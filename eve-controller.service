@@ -12,6 +12,10 @@ WorkingDirectory=/home/admin/eve_helper
 Environment=PYTHONUNBUFFERED=1
 Environment=PYTHONUTF8=1
 Environment=TZ=Asia/Shanghai
+# SQLite 页缓存（每个连接）。默认 100MB 在 300MB 的 cgroup 里余量太薄：
+# 控制器约 30MB + 采集进程（解释器 40MB + 页缓存 + WAL）容易顶到 MemoryHigh。
+# 32MB 足以覆盖订单主表与暂存表的索引遍历，整体余量约 150MB。
+Environment=DB_CACHE_MB=32
 ExecStart=/home/admin/eve_helper/.venv/bin/python -u controller.py
 
 Restart=always
@@ -22,9 +26,11 @@ TimeoutStopSec=60
 KillMode=mixed
 
 # 该 cgroup 覆盖控制器与全部采集子进程。
-# 全量聚合版订单采集峰值约 284MB，留 500MB 上限；完成逐页落盘改造后可降到 300MB。
-MemoryHigh=350M
-MemoryMax=500M
+# 订单采集已改为逐页落盘：Python 堆峰值从 225MB 降到 1.6MB 量级，
+# 实际 RSS 主要是解释器（约 40MB）与 SQLite 页缓存（上面已设为 32MB）。
+# 300MB 上限留约 150MB 余量；内存更紧的机器把 DB_CACHE_MB 再降到 16。
+MemoryHigh=200M
+MemoryMax=300M
 # 子进程被 cgroup OOM killer 杀掉时，控制器继续运行并记录退出码
 OOMPolicy=continue
 

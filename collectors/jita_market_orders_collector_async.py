@@ -39,6 +39,11 @@ except ImportError:
 BASE_URL = "https://esi.evetech.net"
 HEADERS = default_headers()
 
+# 单页请求的超时预算。一页 1000 条约 230KB，正常 <1 秒即可返回；
+# 不显式设置时 aiohttp 默认 total=300s，一页卡住会占着 worker 五分钟，
+# 418 页里只要几页黑洞就可能把整轮拖到 controller 的 600s 上限被强杀。
+CLIENT_TIMEOUT = aiohttp.ClientTimeout(total=60, sock_connect=10, sock_read=30)
+
 # 配置参数
 MAX_RETRIES = 3  # API请求的最大重试次数
 REQUESTS_PER_MINUTE = 800  # 每分钟最大请求数（基于每15分钟12000个令牌）
@@ -72,7 +77,7 @@ db_conn = None
 #   关闭：启动采集器只做一次全量快照，行为与改动前完全一致（走原有 main()）
 #   开启：采集器每 interval_minutes 分钟重复采集一次，并记录订单变更事件
 TRACKER_CONFIG_PATH = os.path.join(paths.BASE_DIR, 'config.json')
-TRACKER_DEFAULTS = {'enabled': False, 'interval_minutes': 30, 'retention_hours': 72}
+TRACKER_DEFAULTS = {'enabled': False, 'interval_minutes': 15, 'retention_hours': 120}
 
 async def init_database():
     """
@@ -219,27 +224,46 @@ async def get_market_orders_page(session, page, order_type="all", abort_event=No
             return [], 0, None, False
     return [], 0, None, False
 
-async def _fetch_full_snapshot(session, order_type="all"):
+async def _fetch_full_snapshot(session, order_type="all", buffer=None):
     """
-    执行一次完整的全量分页拉取（只拉取到内存，不写数据库）。
+    执行一次完整的全量分页拉取。
 
-    返回 (orders, bad_pages, total_pages, aborted)：
-    - bad_pages 为「请求失败 / 成功但空页 / last-modified 与首页不一致」的页码；
-      非空表示该快照不可用，调用方须整体丢弃后重拉。
-    - total_pages 为首页 X-Pages 报告的总页数，供订单总数下限校验使用。
-    - aborted 为 True 表示因连续失败达到 MAX_CONSECUTIVE_FAILURES 而提前中止；
+    两种落点：
+    - buffer 为 None：订单聚合进内存 list 返回。兼容旧路径，418 页实测峰值 284MB；
+    - buffer 为 StagingBuffer：每页校验通过即写入 staging 表并立刻释放该页引用，
+      内存峰值只取决于并发数（约 5–10MB）。这是在 256MB 级小内存机器上长期
+      运行的关键——原先"先全部收进 fetched 字典、最后再聚合"等于把 40 万订单
+      全部驻留内存。
+
+    返回 (payload, bad_pages, total_pages, aborted)：
+    - payload 在 buffer 为 None 时是订单 list，否则是本次收到的订单条数；
+    - bad_pages 为「请求失败 / 成功但空页 / last-modified 与首页不一致」的页码，
+      非空表示该快照不可用，调用方须整体丢弃后重拉；
+    - total_pages 为首页 X-Pages 报告的总页数，供订单总数下限校验使用；
+    - aborted 为 True 表示因连续失败达到 MAX_CONSECUTIVE_FAILURES 而提前中止，
       此时剩余页根本没有发起请求，调用方不应立即整体重拉（会放大错误风暴）。
 
-    拆分为独立函数是为了在检测到跨代或缺页时能整体丢弃并重拉，且不会污染数据库。
+    拆分为独立函数是为了在检测到跨代或缺页时能整体丢弃并重拉，且不会污染主表。
     """
     global error_count
 
-    all_orders = []
+    collected = [] if buffer is None else None
+
+    def sink(batch):
+        """把一页订单送到最终落点；调用返回后该页对象即可被回收。"""
+        if buffer is None:
+            collected.extend(batch)
+        else:
+            buffer.add(batch)
+
+    def payload():
+        """buffer 为 None 时返回订单 list，否则返回本次收到的订单条数。"""
+        return collected if collected is not None else buffer.received
+
     page = 1
     total_pages = 0
     bad_pages = []
     pages = []
-    fetched = {}
     state = {'consecutive_failures': 0, 'aborted': False, 'skipped': 0}
     abort_event = asyncio.Event()
 
@@ -254,14 +278,14 @@ async def _fetch_full_snapshot(session, order_type="all"):
             session, page, order_type)
         if not first_ok:
             logger.error("首页（第 1 页）请求失败，本轮快照作废")
-            return all_orders, [1], 0, False
+            return payload(), [1], 0, False
 
         # 首页满页却拿不到 X-Pages：无法判断是否还有后续页，按不完整处理
         if page_total <= 0 and len(first_page_orders) >= MAX_PAGE_SIZE:
             logger.warning(
                 "首页返回满页 %d 条但缺少 X-Pages 头，无法判断总页数，本轮快照作废",
                 len(first_page_orders))
-            return all_orders, [1], 0, False
+            return payload(), [1], 0, False
 
         # 设置总页数
         total_pages = page_total if page_total > 0 else 1
@@ -269,13 +293,13 @@ async def _fetch_full_snapshot(session, order_type="all"):
             pbar.total = total_pages
 
         # 添加第一页数据
-        all_orders.extend(first_page_orders)
+        sink(first_page_orders)
         if pbar is not None:
             pbar.update(1)
 
         # 单页市场：首页即全部
         if total_pages <= 1:
-            return all_orders, bad_pages, total_pages, False
+            return payload(), bad_pages, total_pages, False
 
         # 首页自称多页却不足一页，说明响应被截断；若照旧返回，会得到一份
         # "只有一页的完整快照"，随后全量覆盖会把整区订单删掉
@@ -284,7 +308,7 @@ async def _fetch_full_snapshot(session, order_type="all"):
                 "首页自称共 %d 页，但只返回 %d 条（< %d），判定响应被截断，本轮快照作废",
                 total_pages, len(first_page_orders), MAX_PAGE_SIZE)
             bad_pages.append(1)
-            return all_orders, bad_pages, total_pages, False
+            return payload(), bad_pages, total_pages, False
 
         # 并发获取剩余页面。
         # 用「有界工作池 + 中止标志」而不是一次 gather 全部任务：
@@ -305,16 +329,18 @@ async def _fetch_full_snapshot(session, order_type="all"):
                     logger.error(f"获取第{page_num}页数据时发生异常: {str(exc)}")
                     error_count += 1
                     result_orders, result_last_modified, ok = None, None, False
-                fetched[page_num] = (result_orders, result_last_modified, ok)
+
                 if abort_event.is_set():
-                    # 已被其他 worker 判定中止，不再累计/记录（该页数据也不可用）
+                    # 已被其他 worker 判定中止，该页数据不可用且不再计数
                     continue
-                # 空页同样算失败：分页区间内不该出现空页
-                if ok and result_orders:
-                    state['consecutive_failures'] = 0
-                    if pbar is not None:
-                        pbar.update(1)
-                else:
+
+                if not ok or not result_orders:
+                    # 失败页与空页都必须记录：静默跳过会得到缺页却看似完整的快照
+                    if not ok:
+                        logger.warning(f"第 {page_num} 页请求失败，本轮快照作废")
+                    else:
+                        logger.warning(f"第 {page_num} 页返回空数据，本轮快照作废")
+                    bad_pages.append(page_num)
                     state['consecutive_failures'] += 1
                     if state['consecutive_failures'] >= MAX_CONSECUTIVE_FAILURES:
                         state['aborted'] = True
@@ -323,39 +349,35 @@ async def _fetch_full_snapshot(session, order_type="all"):
                             "连续 %d 页请求失败，立即中止本轮抓取："
                             "继续请求有触发 ESI 错误限流（100 errors/60s）的风险",
                             MAX_CONSECUTIVE_FAILURES)
+                    continue
+
+                # 分页一致性校验：各页 last-modified 应与首页一致，否则可能跨代
+                if not check_pagination_consistency(first_last_modified, result_last_modified):
+                    # 跨代页不落盘，交由上层整体丢弃本快照并重拉
+                    bad_pages.append(page_num)
+                    state['consecutive_failures'] = 0
+                    continue
+
+                # 三项校验全过才落盘；落盘后立即丢弃该页引用
+                sink(result_orders)
+                state['consecutive_failures'] = 0
+                if pbar is not None:
+                    pbar.update(1)
 
         await asyncio.gather(*[worker() for _ in range(MAX_CONCURRENT_REQUESTS)])
-
-        # 处理结果（按页号排序，便于日志与缺失页统计）
-        for page_num in sorted(fetched):
-            result_orders, result_last_modified, ok = fetched[page_num]
-            if not ok:
-                # 失败页必须计入 bad_pages：静默跳过会得到缺页却看似完整的快照
-                logger.warning(f"第 {page_num} 页请求失败，本轮快照作废")
-                bad_pages.append(page_num)
-                continue
-            if not result_orders:
-                # 分页区间内不该出现空页，按异常页处理，避免静默漏数据
-                logger.warning(f"第 {page_num} 页返回空数据，本轮快照作废")
-                bad_pages.append(page_num)
-                continue
-            # 分页一致性校验：各页 last-modified 应与首页一致，否则可能跨代
-            if not check_pagination_consistency(first_last_modified, result_last_modified):
-                # 记录不一致页，交由上层整体丢弃本快照并重拉，避免混代
-                bad_pages.append(page_num)
-                continue
-            all_orders.extend(result_orders)
 
         if state['aborted']:
             logger.error(
                 "本轮抓取已中止：已发起 %d 页请求，%d 页未发起（分页共 %d 页）",
-                len(fetched), state['skipped'], total_pages)
+                total_pages - 1 - state['skipped'], state['skipped'], total_pages)
+        # 并发下页码乱序追加，排序后便于日志与缺失页统计
+        bad_pages.sort()
     finally:
         # 关闭进度条
         if pbar is not None:
             pbar.close()
 
-    return all_orders, bad_pages, total_pages, state['aborted']
+    return payload(), bad_pages, total_pages, state['aborted']
 
 
 def _duplicate_order_ids(orders):
@@ -377,35 +399,42 @@ def _duplicate_order_ids(orders):
     return dup
 
 
-def _snapshot_problem(orders, bad_pages, total_pages):
-    """判断快照是否可用；可用返回空字符串，否则返回具体原因。"""
+def _snapshot_problem(orders, bad_pages, total_pages, duplicate_count=None):
+    """判断快照是否可用；可用返回空字符串，否则返回具体原因。
+
+    orders 可以是订单列表，也可以是订单计数（逐页落盘时数据已在暂存表，
+    内存里没有 list，只能传计数）。
+    duplicate_count 供流式路径使用：此时重复数由 staging 主键冲突算出
+    （received - 实际行数），不必再扫描内存。
+    """
     if bad_pages:
         shown = bad_pages[:10]
         suffix = ' ...' if len(bad_pages) > 10 else ''
         return f"缺失/失败页 {len(bad_pages)} 个：{shown}{suffix}"
-    dup = _duplicate_order_ids(orders)
+    count = orders if isinstance(orders, int) else len(orders)
+    if duplicate_count is None:
+        # 内存路径：直接扫描；流式路径传入计数，不走这里
+        dup = 0 if isinstance(orders, int) else _duplicate_order_ids(orders)
+    else:
+        dup = duplicate_count
     if dup:
         return f"快照内出现 {dup} 个重复 order_id（疑似跨代混页）"
     if total_pages > 1:
         expected_min = (total_pages - 1) * MAX_PAGE_SIZE
-        if len(orders) < expected_min:
-            return (f"订单数 {len(orders)} 低于分页下限 {expected_min}"
+        if count < expected_min:
+            return (f"订单数 {count} 低于分页下限 {expected_min}"
                     f"（首页报告 {total_pages} 页）")
     return ""
 
 
-async def get_all_market_orders(session, order_type="all"):
-    """获取吉他市场全量订单（跨代 + 缺页 + 数量校验：任何一项不满足都整体重拉）。
+async def _fetch_with_retry(session, order_type="all", buffer=None):
+    """带整体重拉的全量抓取，供「内存版」与「逐页落盘版」共用。
 
-    一份"可用快照"须同时满足：
-    1. 没有失败页 / 空页 / 跨代页（bad_pages 为空）；
-    2. 订单总数不低于 (总页数-1) × 1000，防止分页被静默截断。
-
-    最多重试 MAX_SNAPSHOT_ATTEMPTS 次；仍不满足则抛 IncompleteSnapshotError，
-    由调用方放弃本轮写库（保留上一份完整数据），而不是把残缺快照写进数据库。
-    例外：若本次是「连续失败达到阈值而中止」，说明故障是系统性的，立即报错退出、
-    不再整体重拉——此时重复拉取只会把错误风暴放大成 ESI 错误限流。
-    本函数只返回内存中的订单，写库由调用方在确认快照可用后统一执行。
+    返回 (payload, problem, aborted, best_count)：
+    - payload：buffer 为 None 时是订单 list；否则是写入 staging 的实际行数；
+    - problem：可用时为空串，否则是不可用原因；
+    - aborted：因连续失败而中止，调用方不应立即重拉（会放大错误风暴）；
+    - best_count：历次尝试中拿到的最多订单数，仅用于报错信息。
     """
     best_count = 0
     best_problem = ''
@@ -414,23 +443,87 @@ async def get_all_market_orders(session, order_type="all"):
             logger.warning(
                 "上一轮快照不可用（%s），已丢弃并整体重拉（第 %d/%d 次尝试）",
                 best_problem, attempt, MAX_SNAPSHOT_ATTEMPTS)
-        orders, bad_pages, total_pages, aborted = await _fetch_full_snapshot(session, order_type)
-        problem = _snapshot_problem(orders, bad_pages, total_pages)
-        if not problem:
-            if attempt > 1:
-                logger.info(f"第 {attempt} 次整体拉取已获得完整快照")
-            logger.info(f"吉他市场{order_type}订单获取完成，共 {len(orders)} 个订单")
-            return orders
-        best_count = max(best_count, len(orders))
+        if buffer is not None:
+            buffer.reset()  # 丢弃上一次尝试已写入的暂存行
+
+        payload, bad_pages, total_pages, aborted = await _fetch_full_snapshot(
+            session, order_type, buffer)
+
+        if buffer is None:
+            problem = _snapshot_problem(payload, bad_pages, total_pages)
+            if not problem:
+                if attempt > 1:
+                    logger.info("第 %d 次整体拉取已获得完整快照", attempt)
+                return payload, '', False, len(payload)
+            best_count = max(best_count, len(payload))
+        else:
+            # 先提交暂存写入再判定：重复 order_id 会被 INSERT OR IGNORE 静默吞掉，
+            # 用「收到条数 - 实际行数」精确得到重复数，无需在内存里查重
+            _received, actual, dup = buffer.finish()
+            problem = _snapshot_problem(
+                actual, bad_pages, total_pages, duplicate_count=dup)
+            if not problem:
+                if attempt > 1:
+                    logger.info("第 %d 次整体拉取已获得完整快照", attempt)
+                return actual, '', False, actual
+            best_count = max(best_count, actual)
+
         best_problem = problem
+        if aborted:
+            break
+
+    return ([] if buffer is None else 0), best_problem, aborted, best_count
+
+
+async def get_all_market_orders(session, order_type="all"):
+    """获取吉他市场全量订单到内存（跨代 + 缺页 + 数量校验：任何一项不满足都整体重拉）。
+
+    一份"可用快照"须同时满足：
+    1. 没有失败页 / 空页 / 跨代页（bad_pages 为空）；
+    2. 订单总数不低于 (总页数-1) × 1000，防止分页被静默截断；
+    3. 没有重复 order_id。
+
+    最多重试 MAX_SNAPSHOT_ATTEMPTS 次；仍不满足则抛 IncompleteSnapshotError，
+    由调用方放弃本轮写库（保留上一份完整数据），而不是把残缺快照写进数据库。
+    例外：若本次是「连续失败达到阈值而中止」，说明故障是系统性的，立即报错退出、
+    不再整体重拉——此时重复拉取只会把错误风暴放大成 ESI 错误限流。
+
+    注意：本入口把 40 万订单全部放在内存（峰值约 284MB）。需要在小内存机器上
+    长期运行时请用 get_all_market_orders_streaming，逐页写入暂存表。
+    """
+    payload, problem, aborted, best_count = await _fetch_with_retry(session, order_type)
+    if aborted:
+        raise IncompleteSnapshotError(
+            f"连续 {MAX_CONSECUTIVE_FAILURES} 页请求失败，已提前中止本轮抓取以避免触发 "
+            f"ESI 错误限流（100 errors/60s）；问题：{problem}")
+    if problem:
+        raise IncompleteSnapshotError(
+            f"连续 {MAX_SNAPSHOT_ATTEMPTS} 次拉取均未得到完整快照，最后一次问题：{problem}；"
+            f"最多只拿到 {best_count} 个订单，已放弃写库以保留上一份完整数据")
+    logger.info(f"吉他市场{order_type}订单获取完成，共 {len(payload)} 个订单")
+    return payload
+
+
+async def get_all_market_orders_streaming(session, buffer, order_type="all"):
+    """逐页落盘超集：订单边抓边写入 buffer（staging 表），不在内存里聚合。
+
+    成功时返回写入 staging 的实际行数，暂存表即本轮快照，供后续 SQL diff 使用；
+    失败时清空暂存表并抛 IncompleteSnapshotError，主表保持上一份数据。
+    """
+    actual, problem, aborted, best_count = await _fetch_with_retry(
+        session, order_type, buffer)
+    if aborted or problem:
+        buffer.close()  # 快照不可用，清空暂存表，避免残留数据被误当作本轮快照
         if aborted:
             raise IncompleteSnapshotError(
                 f"连续 {MAX_CONSECUTIVE_FAILURES} 页请求失败，已提前中止本轮抓取以避免触发 "
-                f"ESI 错误限流（100 errors/60s）；问题：{best_problem}")
-
-    raise IncompleteSnapshotError(
-        f"连续 {MAX_SNAPSHOT_ATTEMPTS} 次拉取均未得到完整快照，最后一次问题：{best_problem}；"
-        f"最多只拿到 {best_count} 个订单，已放弃写库以保留上一份完整数据")
+                f"ESI 错误限流（100 errors/60s）；问题：{problem}")
+        raise IncompleteSnapshotError(
+            f"连续 {MAX_SNAPSHOT_ATTEMPTS} 次拉取均未得到完整快照，最后一次问题：{problem}；"
+            f"最多只拿到 {best_count} 个订单，已放弃写库以保留上一份完整数据")
+    logger.info(
+        f"吉他市场{order_type}订单获取完成，共 {actual} 个订单（已逐页写入暂存表）")
+    return actual
 
 
 async def process_orders_to_database(orders, incremental=False):
@@ -649,45 +742,184 @@ def _build_staging_rows(orders):
     return rows
 
 
-async def process_orders_tracking(orders, snapshot_ts, retention_hours):
-    """追踪写库：用磁盘暂存表在 SQLite 内完成快照 diff，不做内存对比，断电可恢复。
+class StagingBuffer:
+    """逐页把订单写入 market_orders_staging，避免 40 万订单常驻内存。
 
-    整个流程在一个事务内完成：若中途断电回滚，market_orders 仍停留在上一份
-    已确认快照，下次采集重新拉取并重新 diff 即可，不会写错或丢状态。
-    原有 process_orders_to_database 保持不变，仅在开关关闭时使用。
+    用法：
+        buffer = StagingBuffer(db_conn)
+        count = await get_all_market_orders_streaming(session, buffer)  # 内部逐页 add
+        ... 在 staging 上做 SQL diff ...
 
-    写库前做规模比对：快照订单数低于库内基线 × MIN_SNAPSHOT_RATIO 时直接放弃
-    本轮 diff —— 否则缺页会被误判成"订单消失"，伪造大量 delete 事件并污染
-    churn 统计。返回 True 表示已写入，False 表示被拒。
+    事务策略：每 commit_every_pages 页提交一次。既不让 WAL 因一个覆盖 40 万行的
+    长事务膨胀到几百 MB，也不必每页 fsync 一次。快照作废时 reset()/close()
+    清空暂存内容，主表完全不受影响。
+
+    并发说明：add() 是同步调用且内部没有 await，在事件循环里不会被其他协程
+    打断，因此多个 worker 共用同一个连接是安全的。
     """
-    global db_conn
+
+    INSERT_SQL = (
+        'INSERT OR IGNORE INTO market_orders_staging '
+        '(order_id, type_id, order_type, price, volume_remain, volume_total, '
+        'min_volume, is_buy_order, duration, range, issued, system_id, location_id) '
+        'VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)')
+
+    def __init__(self, conn, commit_every_pages=20):
+        self.conn = conn
+        self.cursor = conn.cursor()
+        self.commit_every_pages = max(1, int(commit_every_pages))
+        self.received = 0   # 收到的订单条数（含重复）
+        self.actual = 0     # 实际写入行数（去重后）
+        self._pages = 0
+        self.reset()
+
+    def reset(self):
+        """清空暂存表（每次新尝试开始时调用，丢弃上一次的半成品）。"""
+        self.cursor.execute('DELETE FROM market_orders_staging')
+        self.conn.commit()
+        self.received = 0
+        self.actual = 0
+        self._pages = 0
+
+    def add(self, orders):
+        """写入一页订单，达到批次上限时提交。"""
+        if not orders:
+            return 0
+        rows = _build_staging_rows(orders)
+        if not rows:
+            return 0
+        self.cursor.executemany(self.INSERT_SQL, rows)
+        self.received += len(rows)
+        self._pages += 1
+        if self._pages >= self.commit_every_pages:
+            self.conn.commit()
+            self._pages = 0
+        return len(rows)
+
+    def finish(self):
+        """提交剩余写入并统计。
+
+        返回 (收到条数, 实际行数, 重复条数)。重复数来自 INSERT OR IGNORE 的
+        静默跳过——正常快照里 order_id 全局唯一，出现重复即意味着跨代混页。
+        """
+        self.conn.commit()
+        self._pages = 0
+        self.actual = self.cursor.execute(
+            'SELECT COUNT(*) FROM market_orders_staging').fetchone()[0]
+        return self.received, self.actual, self.received - self.actual
+
+    def close(self):
+        """丢弃暂存内容（快照不可用时调用），不影响主表。"""
+        try:
+            self.cursor.execute('DELETE FROM market_orders_staging')
+            self.conn.commit()
+        except sqlite3.Error as exc:
+            logger.warning("清空暂存表失败：%s", exc)
+        self.received = 0
+        self.actual = 0
+        self._pages = 0
+
+
+def _sync_orders_from_staging(delete_missing=True):
+    """把暂存表里的快照同步进主表，只触碰真正有差异的行（不 commit）。
+
+    三段式：
+      1. delete  主表有、暂存没有 —— 订单真的消失了
+      2. insert  暂存有、主表没有 —— 新挂单
+      3. update  两边都有但价格/数量/位置变了
+
+    未变化的行完全不写。15 分钟一轮时每轮约 7,900 单变化，写量从
+    「41.8 万删 + 41.8 万插」降到「约 1.6 万行」，是 96 轮/天能长期跑的前提。
+
+    delete_missing=False 供 _diff_staging 使用：它需要先把消失的订单记成
+    delete 事件再删除，删除动作已在那边完成，这里不必重复扫一遍主表。
+
+    返回 (deleted, inserted, updated)。
+    """
     cursor = db_conn.cursor()
 
-    baseline = cursor.execute(
+    deleted = 0
+    if delete_missing:
+        deleted = cursor.execute('''
+            DELETE FROM market_orders
+            WHERE region_id = ?
+              AND NOT EXISTS (SELECT 1 FROM market_orders_staging s
+                              WHERE s.order_id = market_orders.order_id)
+        ''', (JITA_REGION_ID,)).rowcount
+
+    inserted = cursor.execute('''
+        INSERT INTO market_orders
+            (order_id, region_id, type_id, order_type, price, volume_remain, volume_total,
+             min_volume, is_buy_order, duration, range, issued, system_id, location_id)
+        SELECT s.order_id, ?, s.type_id, s.order_type, s.price, s.volume_remain,
+               s.volume_total, s.min_volume, s.is_buy_order, s.duration, s.range,
+               s.issued, s.system_id, s.location_id
+        FROM market_orders_staging s
+        WHERE NOT EXISTS (SELECT 1 FROM market_orders m WHERE m.order_id = s.order_id)
+    ''', (JITA_REGION_ID,)).rowcount
+
+    # 注意：这里刻意不用 `UPDATE ... FROM`（SQLite 3.33+ 才有）。目标服务器是
+    # 3.26，用行值 + 相关子查询的写法在 3.15+ 都能跑，语义相同。
+    updated = cursor.execute('''
+        UPDATE market_orders
+        SET (price, volume_remain, volume_total, min_volume, duration,
+             range, system_id, location_id, updated_at) = (
+                SELECT s.price, s.volume_remain, s.volume_total, s.min_volume,
+                       s.duration, s.range, s.system_id, s.location_id,
+                       CURRENT_TIMESTAMP
+                FROM market_orders_staging s
+                WHERE s.order_id = market_orders.order_id)
+        WHERE order_id IN (
+            SELECT s.order_id
+            FROM market_orders_staging s
+            JOIN market_orders m ON m.order_id = s.order_id
+            WHERE m.price <> s.price
+               OR m.volume_remain <> s.volume_remain
+               OR m.volume_total <> s.volume_total
+               OR m.location_id <> s.location_id
+               OR m.system_id <> s.system_id)
+    ''').rowcount
+
+    return deleted, inserted, updated
+
+
+def _replace_from_staging(order_count):
+    """非追踪模式：把暂存表快照同步进主表（不产生变更事件，单事务）。
+
+    写入前做规模兜底：新快照低于库内行数 × MIN_SNAPSHOT_RATIO 时拒绝，
+    避免一次缺页或截断把整区订单删光。返回 True 表示已写入。
+    """
+    cursor = db_conn.cursor()
+    existing = cursor.execute(
         'SELECT COUNT(*) FROM market_orders WHERE region_id = ?', (JITA_REGION_ID,)
     ).fetchone()[0]
 
-    if baseline and len(orders) < baseline * MIN_SNAPSHOT_RATIO:
+    if existing and order_count < existing * MIN_SNAPSHOT_RATIO:
         logger.error(
-            "快照规模异常：本次 %d 个订单，库内基线 %d，低于 %.0f%% 阈值；"
-            "跳过本轮 diff（不写订单、不记事件，库内数据保持上一份）",
-            len(orders), baseline, MIN_SNAPSHOT_RATIO * 100)
+            "快照规模异常：本次 %d 个订单，库内 %d，低于 %.0f%% 阈值；已中止覆盖以保留旧数据",
+            order_count, existing, MIN_SNAPSHOT_RATIO * 100)
         return False
 
-    dup = _duplicate_order_ids(orders)
-    if dup:
-        logger.error(
-            "快照含 %d 个重复 order_id（疑似跨代混页），跳过本轮 diff："
-            "重复行会触发 staging 主键冲突并让缺失页统计失真", dup)
-        return False
+    deleted, inserted, updated = _sync_orders_from_staging()
+    db_conn.commit()
+    logger.info(
+        "写入 %d 个订单到数据库（新增 %d，更新 %d，删除 %d，其余 %d 未变化）",
+        order_count, inserted, updated, deleted,
+        order_count - inserted - updated)
+    return True
 
-    # 1) 新快照写入暂存表（覆盖上一次暂存内容）
-    cursor.execute('DELETE FROM market_orders_staging')
-    cursor.executemany(
-        'INSERT INTO market_orders_staging (order_id, type_id, order_type, price, '
-        'volume_remain, volume_total, min_volume, is_buy_order, duration, range, issued, '
-        'system_id, location_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
-        _build_staging_rows(orders))
+
+def _diff_staging(snapshot_ts, retention_hours, order_count, baseline):
+    """在已填充的 market_orders_staging 上执行快照 diff，返回本次事件条数。
+
+    前置条件：暂存表保存着本轮完整且已校验的快照。所有比对都在 SQLite 内完成，
+    不把订单拉回内存；整个 diff 在一个事务里提交，中途失败即回滚，主表保持上一份
+    已确认快照。
+
+    baseline 为本轮开始前 market_orders 的行数：为 0 说明是首次建立基线，
+    此时不记 insert 事件，避免把存量订单误记为新增。
+    """
+    cursor = db_conn.cursor()
 
     # 2) 记录并删除已消失的订单（delete）
     cursor.execute('''
@@ -733,32 +965,8 @@ async def process_orders_tracking(orders, snapshot_ts, retention_hours):
                OR m.volume_total <> s.volume_total)
     ''', (snapshot_ts, JITA_REGION_ID))
 
-    # 5) 暂存合并进 market_orders：新增插入，变化行更新，未变化行保持不动
-    cursor.execute('''
-        INSERT OR IGNORE INTO market_orders
-            (order_id, region_id, type_id, order_type, price, volume_remain, volume_total,
-             min_volume, is_buy_order, duration, range, issued, system_id, location_id)
-        SELECT s.order_id, ?, s.type_id, s.order_type, s.price, s.volume_remain, s.volume_total,
-               s.min_volume, s.is_buy_order, s.duration, s.range, s.issued, s.system_id, s.location_id
-        FROM market_orders_staging s
-    ''', (JITA_REGION_ID,))
-    cursor.execute('''
-        UPDATE market_orders AS m SET
-            price = s.price,
-            volume_remain = s.volume_remain,
-            volume_total = s.volume_total,
-            min_volume = s.min_volume,
-            duration = s.duration,
-            range = s.range,
-            system_id = s.system_id,
-            location_id = s.location_id,
-            updated_at = CURRENT_TIMESTAMP
-        FROM market_orders_staging AS s
-        WHERE m.order_id = s.order_id
-          AND (m.price <> s.price OR m.volume_remain <> s.volume_remain
-               OR m.volume_total <> s.volume_total
-               OR m.location_id <> s.location_id OR m.system_id <> s.system_id)
-    ''')
+    # 5) 暂存合并进 market_orders：只写有差异的行（消失的已在第 2 步删除并记事件）
+    _, inserted, updated = _sync_orders_from_staging(delete_missing=False)
 
     # 6) 本次采集元数据
     event_count = cursor.execute(
@@ -768,7 +976,7 @@ async def process_orders_tracking(orders, snapshot_ts, retention_hours):
         INSERT OR REPLACE INTO market_order_snapshots
             (snapshot_ts, region_id, order_count, event_count, last_modified)
         VALUES (?, ?, ?, ?, ?)
-    ''', (snapshot_ts, JITA_REGION_ID, len(orders), event_count, None))
+    ''', (snapshot_ts, JITA_REGION_ID, order_count, event_count, None))
 
     # 7) 清理超期事件与元数据（保留窗口 = retention_hours）
     cutoff = snapshot_ts - retention_hours * 3600
@@ -776,71 +984,163 @@ async def process_orders_tracking(orders, snapshot_ts, retention_hours):
     cursor.execute('DELETE FROM market_order_snapshots WHERE snapshot_ts < ?', (cutoff,))
 
     db_conn.commit()
+    return event_count
+
+
+async def process_orders_tracking(orders, snapshot_ts, retention_hours):
+    """追踪写库：用磁盘暂存表在 SQLite 内完成快照 diff，不做内存对比，断电可恢复。
+
+    整个流程在一个事务内完成：若中途断电回滚，market_orders 仍停留在上一份
+    已确认快照，下次采集重新拉取并重新 diff 即可，不会写错或丢状态。
+    原有 process_orders_to_database 保持不变，仅在开关关闭时使用。
+
+    写库前做规模比对：快照订单数低于库内基线 × MIN_SNAPSHOT_RATIO 时直接放弃
+    本轮 diff —— 否则缺页会被误判成"订单消失"，伪造大量 delete 事件并污染
+    churn 统计。返回 True 表示已写入，False 表示被拒。
+    """
+    global db_conn
+    cursor = db_conn.cursor()
+
+    baseline = cursor.execute(
+        'SELECT COUNT(*) FROM market_orders WHERE region_id = ?', (JITA_REGION_ID,)
+    ).fetchone()[0]
+
+    if baseline and len(orders) < baseline * MIN_SNAPSHOT_RATIO:
+        logger.error(
+            "快照规模异常：本次 %d 个订单，库内基线 %d，低于 %.0f%% 阈值；"
+            "跳过本轮 diff（不写订单、不记事件，库内数据保持上一份）",
+            len(orders), baseline, MIN_SNAPSHOT_RATIO * 100)
+        return False
+
+    dup = _duplicate_order_ids(orders)
+    if dup:
+        logger.error(
+            "快照含 %d 个重复 order_id（疑似跨代混页），跳过本轮 diff："
+            "重复行会触发 staging 主键冲突并让缺失页统计失真", dup)
+        return False
+
+    # 1) 新快照写入暂存表（覆盖上一次暂存内容）
+    cursor.execute('DELETE FROM market_orders_staging')
+    cursor.executemany(
+        'INSERT INTO market_orders_staging (order_id, type_id, order_type, price, '
+        'volume_remain, volume_total, min_volume, is_buy_order, duration, range, issued, '
+        'system_id, location_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
+        _build_staging_rows(orders))
+
+    # 2) 在暂存表上做 diff（全部在 SQL 内完成，不把订单拉回内存）
+    event_count = _diff_staging(snapshot_ts, retention_hours, len(orders), baseline)
     logger.info(
         "追踪写入完成：快照时间 %s，订单数 %d，本次变更事件 %d",
         snapshot_ts, len(orders), event_count)
     return True
 
 
+async def run_tracking_once(retention_hours=120):
+    """单轮流式采集：逐页写暂存表，全量校验通过后在 SQL 内 diff，然后退出。
+
+    与 process_orders_tracking 的区别只在内存：订单不再聚合成 40 万条的 list，
+    而是每页校验通过即落盘，峰值只取决于并发数（20 并发时约 5–10MB，加上解释器
+    与解析临时对象实测 < 100MB）。这是能在小内存服务器上长期运行的关键。
+
+    返回退出码语义（runners/orders_once.py 直接透传）：
+      0 成功写入 / 2 快照不完整（已保留上一份数据）/ 3 未取到订单
+      4 被规模校验拒绝 / 1 未预期异常
+    """
+    global db_conn
+
+    await init_database()
+    await init_tracking_schema()
+
+    cursor = db_conn.cursor()
+    baseline = cursor.execute(
+        'SELECT COUNT(*) FROM market_orders WHERE region_id = ?', (JITA_REGION_ID,)
+    ).fetchone()[0]
+
+    buffer = StagingBuffer(db_conn)
+    try:
+        async with aiohttp.ClientSession(headers=HEADERS, timeout=CLIENT_TIMEOUT) as session:
+            try:
+                count = await get_all_market_orders_streaming(session, buffer, "all")
+            except IncompleteSnapshotError as exc:
+                logger.error("本轮快照不完整，保留上一份数据：%s", exc)
+                return 2
+
+        if not count:
+            logger.warning("未获取到任何订单，跳过写库")
+            return 3
+
+        # 规模兜底：与内存版同一阈值，防止大范围截断被当成"订单消失"
+        if baseline and count < baseline * MIN_SNAPSHOT_RATIO:
+            logger.error(
+                "快照规模异常：本次 %d 个订单，库内基线 %d，低于 %.0f%% 阈值；"
+                "跳过本轮 diff（不写订单、不记事件，库内数据保持上一份）",
+                count, baseline, MIN_SNAPSHOT_RATIO * 100)
+            buffer.close()
+            return 4
+
+        snapshot_ts = int(time.time())
+        event_count = _diff_staging(snapshot_ts, retention_hours, count, baseline)
+        logger.info(
+            "追踪写入完成（逐页落盘）：快照时间 %s，订单数 %d，本次变更事件 %d",
+            snapshot_ts, count, event_count)
+        return 0
+    except Exception:
+        logger.exception("逐页落盘采集发生未预期异常")
+        return 1
+
+
 async def main_tracking():
     """追踪模式主循环：每 interval_minutes 分钟采集一次并记录变更事件。
+
+    每轮都走 run_tracking_once（逐页落盘），内存峰值只取决于并发数，
+    不再把 40 万订单聚合进内存。单轮异常不终止循环，连续 MAX_CYCLE_ERRORS
+    轮仍失败才停止。
 
     开关关闭时不会被调用（见文件末尾分派），关闭状态仍走原有 main()。
     """
     start_time = time.time()
-    all_orders = []
     last_incomplete = False
     last_failed = False
     try:
         await init_database()
         await init_tracking_schema()
 
-        async with aiohttp.ClientSession(headers=HEADERS) as session:
-            cycle_errors = 0
-            while True:
-                tracker = load_tracker_config()
-                if not tracker['enabled']:
-                    logger.info("追踪开关已关闭，停止追踪循环")
+        cycle_errors = 0
+        while True:
+            tracker = load_tracker_config()
+            if not tracker['enabled']:
+                logger.info("追踪开关已关闭，停止追踪循环")
+                break
+
+            # 单轮异常不允许终止整个追踪循环：记录后等下一轮重试，
+            # 连续多轮仍失败才停止（避免一个坏快照/一次主键冲突就让采集器静默退出）
+            try:
+                logger.info("开始获取吉他市场订单数据（追踪模式，逐页落盘）...")
+                code = await run_tracking_once(tracker['retention_hours'])
+                last_incomplete = (code == 2)
+                last_failed = False
+                if code == 2:
+                    logger.warning("本轮未采集到可用快照，数据库与事件表保持不变")
+                elif code == 3:
+                    logger.warning("没有获取到任何吉他市场订单数据")
+                elif code != 0:
+                    logger.warning("本轮未写入（退出码 %d），库内数据保持不变", code)
+                cycle_errors = 0
+            except Exception as exc:
+                last_failed = True
+                cycle_errors += 1
+                logger.error(
+                    "本轮采集/写库异常（连续第 %d 次），已跳过本轮并等待下一次采集：%s",
+                    cycle_errors, exc, exc_info=True)
+                if cycle_errors >= MAX_CYCLE_ERRORS:
+                    logger.error(
+                        "连续 %d 轮异常，停止追踪循环；请检查数据库可用性与磁盘空间",
+                        cycle_errors)
                     break
 
-                # 单轮异常不允许终止整个追踪循环：记录后等下一轮重试，
-                # 连续多轮仍失败才停止（避免一个坏快照/一次主键冲突就让采集器静默退出）
-                try:
-                    logger.info("开始获取吉他市场订单数据（追踪模式）...")
-                    snapshot_incomplete = False
-                    try:
-                        all_orders = await get_all_market_orders(session, "all")
-                    except IncompleteSnapshotError as exc:
-                        snapshot_incomplete = True
-                        all_orders = []
-                        logger.error("本轮快照不完整，跳过本次 diff（保留上一份快照与事件）：%s", exc)
-
-                    last_incomplete = snapshot_incomplete
-                    if snapshot_incomplete:
-                        logger.warning("本轮未采集到可用快照，数据库与事件表保持不变")
-                    elif not all_orders:
-                        logger.warning("没有获取到任何吉他市场订单数据")
-                    else:
-                        logger.info(f"获取到 {len(all_orders)} 个吉他市场订单数据")
-                        await process_orders_tracking(
-                            all_orders, int(time.time()), tracker['retention_hours'])
-                    cycle_errors = 0
-                    last_failed = False
-                except Exception as exc:
-                    last_failed = True
-                    cycle_errors += 1
-                    logger.error(
-                        "本轮采集/写库异常（连续第 %d 次），已跳过本轮并等待下一次采集：%s",
-                        cycle_errors, exc, exc_info=True)
-                    if cycle_errors >= MAX_CYCLE_ERRORS:
-                        logger.error(
-                            "连续 %d 轮异常，停止追踪循环；请检查数据库可用性与磁盘空间",
-                            cycle_errors)
-                        break
-
-                interval = tracker['interval_minutes']
-                logger.info(f"追踪模式已启用，{interval} 分钟后进行下一次采集（关闭 config.json 开关可停止）")
-                await asyncio.sleep(interval * 60)
+            interval = tracker['interval_minutes']
+            logger.info(f"追踪模式已启用，{interval} 分钟后进行下一次采集（关闭 config.json 开关可停止）")
+            await asyncio.sleep(interval * 60)
     except Exception as e:
         logger.error(f"发生未预期的错误: {str(e)}", exc_info=True)
     finally:
@@ -851,50 +1151,51 @@ async def main_tracking():
             except Exception as e:
                 logger.error(f"关闭数据库连接时出错: {str(e)}")
         end_time = time.time()
-        logger.info(f"吉他市场订单追踪结束！")
+        logger.info("吉他市场订单追踪结束！")
         if last_incomplete:
             logger.warning("最后一次采集快照不完整，未写库；数据库保持上一份完整快照")
         elif last_failed:
             logger.warning("最后一次采集异常，未写库；数据库保持上一份快照")
         else:
-            logger.info(f"最后一次获取订单数: {len(all_orders)}")
+            logger.info("最后一次采集已完成（逐页落盘）")
         logger.info(f"错误数量: {error_count}")
         logger.info(f"总运行时长: {end_time - start_time:.2f} 秒")
 
 
 async def main():
-    """
-    主函数，协调整个流程
+    """全量模式：抓一份完整快照后同步进主表（跑一次即退出）。
+
+    同样走逐页落盘：订单先写入暂存表，校验通过后只同步有差异的行
+    （删除消失、插入新增、更新变化），未变化的订单不重写，因此反复执行
+    也不会产生无谓的写放大。内存峰值只取决于并发数。
     """
     start_time = time.time()
-    all_orders = []
+    order_count = 0
     snapshot_incomplete = False
+    write_rejected = False
 
     try:
-        # 初始化数据库
+        # 初始化数据库（暂存表是逐页落盘的前提）
         await init_database()
-        
-        # 异步获取吉他市场订单数据
-        async with aiohttp.ClientSession(headers=HEADERS) as session:
-            logger.info("开始获取吉他市场订单数据...")
-            
-            # 一次性获取所有订单（买单和卖单）
+        await init_tracking_schema()
+
+        buffer = StagingBuffer(db_conn)
+        async with aiohttp.ClientSession(headers=HEADERS, timeout=CLIENT_TIMEOUT) as session:
+            logger.info("开始获取吉他市场订单数据（逐页落盘）...")
             try:
-                all_orders = await get_all_market_orders(session, "all")
+                order_count = await get_all_market_orders_streaming(session, buffer, "all")
             except IncompleteSnapshotError as exc:
                 snapshot_incomplete = True
+                order_count = 0
                 logger.error("本轮快照不完整，已跳过写库以保留上一份完整数据：%s", exc)
 
             if snapshot_incomplete:
                 logger.warning("写库已跳过，数据库保持上一份完整快照")
-            elif not all_orders:
+            elif not order_count:
                 logger.warning("没有获取到任何吉他市场订单数据")
             else:
-                logger.info(f"获取到 {len(all_orders)} 个吉他市场订单数据")
+                write_rejected = not _replace_from_staging(order_count)
 
-                # 将订单数据写入数据库
-                await process_orders_to_database(all_orders)
-    
     except Exception as e:
         logger.error(f"发生未预期的错误: {str(e)}", exc_info=True)
     finally:
@@ -905,16 +1206,18 @@ async def main():
                 logger.info("数据库连接已关闭")
             except Exception as e:
                 logger.error(f"关闭数据库连接时出错: {str(e)}")
-        
+
         # 计算并记录执行时间
         end_time = time.time()
         total_time = end_time - start_time
-        
-        logger.info(f"吉他市场订单数据收集完成！")
+
+        logger.info("吉他市场订单数据收集完成！")
         if snapshot_incomplete:
             logger.warning("本轮快照不完整，未写库；数据库保持上一份完整快照")
+        elif write_rejected:
+            logger.warning("写库被规模校验拒绝；数据库保持上一份数据")
         else:
-            logger.info(f"获取订单总数: {len(all_orders)}")
+            logger.info(f"获取订单总数: {order_count}")
         logger.info(f"错误数量: {error_count}")
         logger.info(f"总耗时: {total_time:.2f} 秒")
 

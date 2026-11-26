@@ -6,7 +6,7 @@
 import os
 import sys
 import tempfile
-from datetime import datetime
+from datetime import datetime, timezone
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, os.path.dirname(HERE))
@@ -118,9 +118,92 @@ def test_state_roundtrip():
     os.remove(path)
 
 
+def test_daily_success_guard():
+    """当天窗口内成功过就跳过，失败或跨日则放行。"""
+    from types import SimpleNamespace
+
+    from plugins.guards import DailySuccessGuard
+
+    path = os.path.join(tempfile.gettempdir(), "eve_guard_state_test.json")
+    try:
+        os.remove(path)
+    except OSError:
+        pass
+
+    st = State(path)
+    ctx = SimpleNamespace(state=st, task=SimpleNamespace(name="history"))
+    guard = DailySuccessGuard({"since": "19:00"}, {})
+
+    assert guard.check(ctx) == (True, ""), "从未成功过应放行"
+
+    now = datetime.now()
+    boundary_today = now.replace(hour=19, minute=0, second=0, microsecond=0).timestamp()
+
+    st.update("history", last_exit_code=0, last_end=int(boundary_today - 86400 + 300))
+    assert guard.check(ctx)[0] is True, "昨天成功不应阻止今天"
+
+    st.update("history", last_exit_code=0, last_end=int(boundary_today + 300))
+    passed, reason = guard.check(ctx)
+    assert passed is False and "已成功" in reason, "今天窗口后成功应跳过"
+
+    st.update("history", last_exit_code=6, last_end=int(now.timestamp()))
+    assert guard.check(ctx)[0] is True, "今天失败（数据未刷新）应允许重试"
+    os.remove(path)
+
+
+def test_history_freshness():
+    """Last-Modified 的 UTC 日期决定「今天的数据是否已生成」。"""
+    sys.path.insert(0, os.path.join(os.path.dirname(HERE), "runners"))
+    import history_once
+
+    now = datetime(2026, 11, 26, 6, 30, tzinfo=timezone.utc)
+
+    fresh, _ = history_once.freshness_from_header(
+        "Wed, 25 Nov 2026 11:05:58 GMT", now)
+    assert fresh is False, "昨天的 Last-Modified 应判为未刷新"
+
+    fresh, _ = history_once.freshness_from_header(
+        "Thu, 26 Nov 2026 11:05:58 GMT", now)
+    assert fresh is True, "今天的 Last-Modified 应判为已刷新"
+
+    # 北京时间 26 日 07:00 == UTC 25 日 23:00，仍属昨天
+    fresh, _ = history_once.freshness_from_header(
+        "Thu, 26 Nov 2026 07:00:00 +0800", now)
+    assert fresh is False, "跨时区必须换算到 UTC 再比较日期"
+
+    assert history_once.freshness_from_header(None, now)[0] is False
+    assert history_once.freshness_from_header("garbage", now)[0] is False
+
+
+def test_rate_limit_header_parsing():
+    """X-Ratelimit-Limit 形如 12000/15m，解析失败会让低水位降速整体失效。"""
+    sys.path.insert(0, os.path.join(os.path.dirname(HERE), "collectors"))
+    from esi_client import RateLimitMonitor, TokenBucket, _to_int
+
+    assert _to_int("12000/15m") == 12000
+    assert _to_int("900/15m") == 900
+    assert _to_int("11997") == 11997
+    assert _to_int(None) is None
+    assert _to_int("garbage") is None
+
+    monitor = RateLimitMonitor()
+    assert monitor.observe({"X-Ratelimit-Remaining": "100",
+                            "X-Ratelimit-Limit": "12000/15m"}) == 0.5
+    assert monitor.observe({"X-Ratelimit-Remaining": "2000",
+                            "X-Ratelimit-Limit": "12000/15m"}) == 0.2
+    assert monitor.observe({"X-Ratelimit-Remaining": "11000",
+                            "X-Ratelimit-Limit": "12000/15m"}) == 0.0
+
+    bucket = TokenBucket()
+    assert bucket.update_capacity_from_header("900/15m") is True
+    assert bucket.capacity == 900
+
+
 def main():
     tests = [test_interval, test_daily, test_weekly, test_monthly,
-             test_skip_window, test_resource_gate, test_state_roundtrip]
+             test_skip_window, test_resource_gate, test_state_roundtrip,
+             test_daily_success_guard, test_history_freshness,
+             test_rate_limit_header_parsing]
     for fn in tests:
         fn()
         print(f"  PASS  {fn.__name__}")

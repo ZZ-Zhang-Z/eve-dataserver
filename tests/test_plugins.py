@@ -6,6 +6,7 @@
 3. 旧格式（runner/script/skip_windows）与显式写法等价
 4. 依赖环检测
 5. 自定义执行器 / 自定义闸门 / 重试 —— 全部不改 controller.py
+6. 执行器抛未捕获异常时的任务级兜底（控制器继续运行）
 
 直接运行：
     python EVEDataserver/tests/test_plugins.py
@@ -170,6 +171,17 @@ class BlockingGuard:
         return "始终拦截"
 
 
+@register_executor("exploding_test")
+class ExplodingExecutor:
+    """直接抛异常，用于验证任务级兜底不会带崩控制器。"""
+
+    def __init__(self, spec, cfg):
+        self.spec = spec or {}
+
+    def run(self, ctx):
+        raise RuntimeError("模拟插件崩溃")
+
+
 def _temp_state():
     path = os.path.join(tempfile.gettempdir(), "eve_plugin_test_state.json")
     try:
@@ -238,10 +250,35 @@ def test_dependency_gate():
     assert executed is True, reason
 
 
+def test_exception_does_not_kill_controller():
+    """执行器抛未捕获异常时，任务记为失败但不影响后续调度。"""
+    cfg = {"_root": BASE, "resources": {}}
+    task = build_task("boom", {
+        "executor": {"type": "exploding_test"},
+        "schedule": {"type": "interval", "minutes": 30},
+    }, cfg)
+    state = _temp_state()
+
+    executed, reason = controller.run_task(task, cfg, state, threading.Event())
+    assert executed is True, reason
+
+    item = state.task("boom")
+    assert item["last_exit_code"] == 1
+    assert "RuntimeError" in item["last_message"]
+    assert item["consecutive_failures"] == 1
+    assert item["last_end"] is not None, "结束时间必须写入，否则调度会卡住"
+
+    # 再来一次：控制器仍然可用，失败计数继续累加
+    executed, _ = controller.run_task(task, cfg, state, threading.Event())
+    assert executed is True
+    assert state.task("boom")["consecutive_failures"] == 2
+
+
 def main():
     tests = [test_registry_errors, test_cron, test_legacy_and_explicit_equivalent,
              test_dependency_cycle, test_custom_executor_via_config,
-             test_guard_blocks_and_records_reason, test_retry, test_dependency_gate]
+             test_guard_blocks_and_records_reason, test_retry, test_dependency_gate,
+             test_exception_does_not_kill_controller]
     for fn in tests:
         fn()
         print(f"  PASS  {fn.__name__}")

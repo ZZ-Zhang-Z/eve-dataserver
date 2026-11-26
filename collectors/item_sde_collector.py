@@ -85,6 +85,15 @@ def _download_sde():
     返回本地 zip 路径。
     """
     os.makedirs(SDE_CACHE_DIR, exist_ok=True)
+    tmp_path = SDE_ZIP_PATH + '.part'
+    # 上次下载中断可能留下半份文件（最大约 100MB）。每次开始前清掉，
+    # 避免磁盘被一个永远不会被 replace 的 .part 长期占住。
+    if os.path.exists(tmp_path):
+        try:
+            os.remove(tmp_path)
+            logger.info("已清理上次残留的半成品文件：%s", tmp_path)
+        except OSError as exc:
+            logger.warning("清理残留 .part 失败（%s），本次将直接覆盖", exc)
     meta = _load_meta()
     headers = {"User-Agent": get_user_agent()}
     if meta.get('etag'):
@@ -97,25 +106,33 @@ def _download_sde():
             last_modified = resp.headers.get('Last-Modified')
             total = int(resp.headers.get('Content-Length') or 0)
             logger.info("开始下载 SDE zip（%.1f MB）...", total / 1048576 if total else 0)
-            tmp_path = SDE_ZIP_PATH + '.part'
             downloaded = 0
             last_log = time.time()
-            with open(tmp_path, 'wb') as out:
-                while True:
-                    chunk = resp.read(1 << 20)
-                    if not chunk:
-                        break
-                    out.write(chunk)
-                    downloaded += len(chunk)
-                    if time.time() - last_log >= 3:
-                        if total:
-                            logger.info("下载进度 %d%%（%.1f/%.1f MB）",
-                                        downloaded * 100 // total,
-                                        downloaded / 1048576, total / 1048576)
-                        else:
-                            logger.info("已下载 %.1f MB", downloaded / 1048576)
-                        last_log = time.time()
-            os.replace(tmp_path, SDE_ZIP_PATH)
+            try:
+                with open(tmp_path, 'wb') as out:
+                    while True:
+                        chunk = resp.read(1 << 20)
+                        if not chunk:
+                            break
+                        out.write(chunk)
+                        downloaded += len(chunk)
+                        if time.time() - last_log >= 3:
+                            if total:
+                                logger.info("下载进度 %d%%（%.1f/%.1f MB）",
+                                            downloaded * 100 // total,
+                                            downloaded / 1048576, total / 1048576)
+                            else:
+                                logger.info("已下载 %.1f MB", downloaded / 1048576)
+                            last_log = time.time()
+                os.replace(tmp_path, SDE_ZIP_PATH)
+            except BaseException:
+                # 中断 / 磁盘满 / 连接断开：删掉半成品再抛出，
+                # 否则 100MB 的 .part 会一直躺在 data/sde/ 下
+                try:
+                    os.remove(tmp_path)
+                except OSError:
+                    pass
+                raise
         _save_meta({'etag': etag, 'last_modified': last_modified,
                     'downloaded_at': time.strftime('%Y-%m-%d %H:%M:%S'),
                     'size': os.path.getsize(SDE_ZIP_PATH)})

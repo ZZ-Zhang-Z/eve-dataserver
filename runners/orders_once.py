@@ -29,7 +29,7 @@ import jita_market_orders_collector_async as collector  # noqa: E402
 
 
 async def run_once():
-    retention = int(os.environ.get("EVE_RETENTION_HOURS", "24"))
+    retention = int(os.environ.get("EVE_RETENTION_HOURS", "120"))
 
     # 采集器若已提供流式单轮入口，优先使用：内存峰值只与并发数相关
     streaming = getattr(collector, "run_tracking_once", None)
@@ -39,7 +39,8 @@ async def run_once():
     await collector.init_database()
     await collector.init_tracking_schema()
 
-    async with aiohttp.ClientSession(headers=collector.HEADERS) as session:
+    async with aiohttp.ClientSession(
+            headers=collector.HEADERS, timeout=collector.CLIENT_TIMEOUT) as session:
         try:
             orders = await collector.get_all_market_orders(session, "all")
         except collector.IncompleteSnapshotError as exc:

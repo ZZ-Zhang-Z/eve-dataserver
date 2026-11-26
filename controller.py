@@ -198,8 +198,15 @@ def _run_with_retry(task, ctx, stop_event):
 
 
 def run_task(task, cfg, state, stop_event):
-    """执行一个任务。返回 (是否真的执行了, 跳过原因)。"""
+    """执行一个任务。返回 (是否真的执行了, 跳过原因)。
+
+    执行阶段整体兜底：executor / hook / 插件抛出的任何未捕获异常都会转成
+    exit_code=1，并照常写结束状态，避免单个任务的异常把主循环带崩（那会让
+    systemd 重启控制器并丢掉当前调度进度）。被闸门或依赖拦下属于「未执行」，
+    不写 last_end，也不计失败次数。
+    """
     ctx = TaskContext.new(task, ROOT, state, stop_event, log)
+    previous = state.task(task.name)
 
     unmet = [dep for dep in task.depends_on if not _task_succeeded(state, dep)]
     if unmet:
@@ -213,21 +220,24 @@ def run_task(task, cfg, state, stop_event):
         if not ok:
             return False, f"闸门 {getattr(guard, 'plugin_name', '?')}：{reason}"
 
-    previous = state.task(task.name)
     state.update(task.name, last_start=int(time.time()), last_skip_reason=None,
                  total_runs=previous["total_runs"] + 1)
 
-    for hook in task.hooks:
-        callback = getattr(hook, "on_before", None)
-        if callable(callback):
-            _safe_hook(callback, ctx)
+    try:
+        for hook in task.hooks:
+            callback = getattr(hook, "on_before", None)
+            if callable(callback):
+                _safe_hook(callback, ctx)
 
-    result = _run_with_retry(task, ctx, stop_event)
+        result = _run_with_retry(task, ctx, stop_event)
 
-    for hook in task.hooks:
-        callback = getattr(hook, "on_after", None)
-        if callable(callback):
-            _safe_hook(callback, ctx, result)
+        for hook in task.hooks:
+            callback = getattr(hook, "on_after", None)
+            if callable(callback):
+                _safe_hook(callback, ctx, result)
+    except Exception as exc:
+        log.exception("[%s] 任务执行出现未捕获异常，按失败处理（控制器继续运行）", task.name)
+        result = TaskResult(exit_code=1, message=f"{type(exc).__name__}: {exc}")
 
     failures = 0 if result.ok else previous["consecutive_failures"] + 1
     state.update(

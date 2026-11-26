@@ -2,15 +2,18 @@
   "_说明": [
     "采集器运行时配置模板。采集器按 paths.BASE_DIR/config.json 读取，即项目根目录。",
     "部署：cp config.collector.example.json config.json，然后按需修改。",
-    "user_agent 建议填自己的邮箱，便于 CCP 在异常流量时联系；",
-    "market_orders_tracker.enabled 设为 true 才会产生变更事件（churn 数据源）。",
+    "user_agent 必须换成自己的真实邮箱：本字段非空就会覆盖采集器内置的默认 UA，",
+    "  照抄模板里的 your-email@example.com 等于把真实联系地址换成占位符，比留空更糟；",
+    "  留空字符串则回退到代码内置的默认值。",
+    "market_orders_tracker 仅对「单独运行采集器脚本」的旧路径生效；控制器走 runners/orders_once.py，",
+    "  变更事件总是产生，保留时长由 controller.json 里的 EVE_RETENTION_HOURS 决定。",
     "注意：本文件与 controller.json（控制器调度表）是两个不同的配置。"
   ],
   "compatibility_date": "2026-08-18",
   "user_agent": "EveHelperMarketCollector/1.0 (your-email@example.com)",
   "market_orders_tracker": {
     "enabled": false,
-    "interval_minutes": 30,
-    "retention_hours": 24
+    "interval_minutes": 15,
+    "retention_hours": 120
   }
 }

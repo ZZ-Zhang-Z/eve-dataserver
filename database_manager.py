@@ -1,3 +1,4 @@
+import os
 import sqlite3
 import threading
 
@@ -5,6 +6,24 @@ from paths import DB_FILES
 
 # 数据库文件路径配置（集中定义于 paths.py，基于文件位置推导，不依赖 CWD）
 DB_CONFIG = DB_FILES
+
+# 每个连接的 SQLite 页缓存上限（MB）。默认 100MB 对齐历史行为；
+# 小内存机器（≤1GB）建议用环境变量降到 16：
+#   DB_CACHE_MB=16
+# 页缓存过大会与采集器的并发页缓冲叠加，在 256MB 级容器里容易被 OOM kill。
+# 空值/非法值回退默认，避免 `Environment=DB_CACHE_MB=` 这种写法让整个采集器
+# 在 import 阶段就抛 ValueError（错误信息与配置无关，极难定位）。
+def _read_cache_mb(default=100):
+    raw = os.environ.get('DB_CACHE_MB')
+    if raw is None or str(raw).strip() == '':
+        return default
+    try:
+        return max(1, int(str(raw).strip()))
+    except ValueError:
+        return default
+
+
+_CACHE_MB = _read_cache_mb()
 
 # 表到数据库的映射
 table_to_db = {
@@ -64,7 +83,7 @@ class DatabaseManager:
             cursor = conn.cursor()
             cursor.execute("PRAGMA journal_mode=WAL;")
             cursor.execute("PRAGMA synchronous=NORMAL;")  # WAL 下提交不再逐次 fsync，显著加快写库
-            cursor.execute("PRAGMA cache_size=-100000;")  # 100MB缓存
+            cursor.execute(f"PRAGMA cache_size=-{_CACHE_MB * 1000};")  # 页缓存（默认 100MB）
             
             # 存储连接到当前线程的local对象
             self.local.connections[db_type] = conn

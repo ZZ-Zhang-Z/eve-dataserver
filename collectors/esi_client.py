@@ -132,8 +132,18 @@ def token_cost(status_code):
 
 
 def _to_int(value):
+    """把响应头里的数值转成 int。
+
+    `X-Ratelimit-Limit` 的实际格式是「总量/窗口」，例如 `12000/15m`，
+    直接 int() 会抛 ValueError。这里取 `/` 之前的部分，其余按纯数字处理。
+    """
+    if value is None:
+        return None
+    text = str(value).strip()
+    if "/" in text:
+        text = text.split("/", 1)[0].strip()
     try:
-        return int(value)
+        return int(text)
     except (TypeError, ValueError):
         return None
 

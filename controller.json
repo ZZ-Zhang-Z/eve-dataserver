@@ -17,20 +17,24 @@
   "tasks": {
     "orders": {
       "enabled": true,
-      "desc": "吉他订单快照与变更事件",
+      "desc": "吉他订单快照与变更事件（每轮只写变化行）",
       "runner": "runners/orders_once.py",
-      "schedule": { "type": "interval", "minutes": 30, "align": true },
+      "schedule": { "type": "interval", "minutes": 15, "align": true },
       "skip_windows": [["18:55", "19:45"]],
-      "timeout_seconds": 300,
+      "timeout_seconds": 600,
       "retry": { "max_attempts": 2, "delay_seconds": 120 },
-      "env": { "EVE_RETENTION_HOURS": "24" }
+      "env": { "EVE_RETENTION_HOURS": "120" }
     },
 
     "history": {
       "enabled": true,
-      "desc": "全量成交历史（15216 个 type，约 40 分钟）",
+      "desc": "全量成交历史（15216 个 type，约 40 分钟）；维护窗后每小时重试，成功即停",
       "runner": "runners/history_once.py",
-      "schedule": { "type": "daily", "at": "08:00" },
+      "schedule": { "type": "cron", "expr": "10 19-23 * * *" },
+      "guards": [
+        { "type": "daily_success", "since": "19:00" },
+        { "type": "resources", "min_free_mem_mb": 180, "min_free_disk_mb": 2048, "max_load_per_core": 2.0 }
+      ],
       "timeout_seconds": 7200
     },
 

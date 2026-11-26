@@ -147,6 +147,11 @@ async def get_market_history(session, type_id):
                     history = await response.json()
                     return history
                 elif response.status == 404:
+                    # 404 在 ESI 侧属于 4xx，同样计入全局「100 个非 2xx/3xx / 60 秒」
+                    # 错误限制——打穿后连订单采集也会一起返回 420。这里虽然把它当
+                    # 「该物品没有历史」正常跳过，但必须记录，否则大量无历史物品的
+                    # 404 完全不会被本地限流器感知。
+                    error_rate_tracker.record()
                     logger.info(f"物品类型 {type_id} 无历史订单数据")
                     return []
                 else:
@@ -313,6 +318,8 @@ async def get_active_type_ids(session):
                         
                         break
                     elif response.status == 404:
+                        # 同样计入全局错误限制（见 get_market_history 的 404 分支）
+                        error_rate_tracker.record()
                         logger.warning(
                             "活跃物品类型第 %d 页返回 404（分页收缩），"
                             "按已取到的 %d 个类型继续", page, len(active_type_ids))
