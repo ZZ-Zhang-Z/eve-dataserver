@@ -1,0 +1,14 @@
+# 采集子进程日志轮转。
+# 控制器的子进程输出会持续追加到 logs/collectors/<task>.log
+# （orders 每天约 48 轮、每轮数 KB，累计可达数 MB/天）。
+# 注意：logs/controller/controller.log 由 RotatingFileHandler 自行管理，不在此列。
+/home/admin/eve_helper/logs/collectors/*.log {
+    daily
+    rotate 7
+    compress
+    delaycompress
+    missingok
+    notifempty
+    copytruncate
+    su admin admin
+}

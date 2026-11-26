@@ -1,0 +1,267 @@
+{% extends "base.html" %}
+{% set active_page = '/wallet' %}
+{% block title %}钱包管理 · EVE Helper{% endblock %}
+
+{% block body %}
+<div class="wrap">
+    <div class="page-head" data-reveal style="--d:.02s">
+        <div>
+            <div class="eyebrow">Wallet Ledger</div>
+            <h1>钱包收支</h1>
+            <div class="sub">导入钱包流水并查看收入、支出与利润趋势</div>
+        </div>
+        <div class="seg" id="time-range" role="tablist" aria-label="时间范围">
+            <button data-value="30" class="active">30 天</button>
+            <button data-value="7">7 天</button>
+        </div>
+    </div>
+
+    <!-- KPI -->
+    <div class="kpi" data-reveal style="grid-template-columns:repeat(3,1fr);--d:.06s">
+        <div class="cell">
+            <div class="label">总收入 <span class="range-tag">30 天</span></div>
+            <div class="value pos" id="total-income">0</div>
+            <div class="foot">ISK 流入</div>
+        </div>
+        <div class="cell">
+            <div class="label">总支出 <span class="range-tag">30 天</span></div>
+            <div class="value neg" id="total-expense">0</div>
+            <div class="foot">ISK 流出</div>
+        </div>
+        <div class="cell">
+            <div class="label">总利润 <span class="range-tag">30 天</span></div>
+            <div class="value" id="total-profit">0</div>
+            <div class="foot">净收支</div>
+        </div>
+    </div>
+
+    <!-- 图表 -->
+    <div class="section" data-reveal style="--d:.1s">
+        <div class="section-head">
+            <h2><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><use href="#i-chart"/></svg>收支分析</h2>
+            <span class="hint" id="chart-range">近 30 天</span>
+        </div>
+        <div class="chart-grid">
+            <div class="panel">
+                <div class="panel-head"><b>每日收支趋势</b><span class="hint">ISK</span></div>
+                <div class="chart-box"><canvas id="daily-chart"></canvas></div>
+            </div>
+            <div class="panel">
+                <div class="panel-head"><b>收支类型分布</b><span class="hint">按金额</span></div>
+                <div class="chart-box"><canvas id="category-chart"></canvas></div>
+            </div>
+        </div>
+    </div>
+
+    <!-- 最近记录 -->
+    <div class="section" data-reveal style="--d:.14s">
+        <div class="section-head">
+            <h2><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><use href="#i-log"/></svg>最近记录</h2>
+            <label class="check">
+                <input type="checkbox" id="exclude-contracts"> 排除合同相关记录
+            </label>
+        </div>
+        <div class="panel">
+            <div class="table-scroll" style="max-height:520px">
+                <table class="data compact">
+                    <thead><tr>
+                        <th style="width:170px">日期时间</th>
+                        <th style="width:150px">类型</th>
+                        <th class="r">金额</th>
+                        <th class="r">余额</th>
+                        <th>描述</th>
+                    </tr></thead>
+                    <tbody id="records-body"><tr class="empty"><td colspan="5">暂无记录</td></tr></tbody>
+                </table>
+            </div>
+            <div class="panel-head" style="border-top:1px solid var(--line);border-bottom:0;justify-content:center">
+                <button class="btn ghost sm" id="load-more" style="display:none">
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><use href="#i-refresh"/></svg>
+                    加载更多
+                </button>
+                <span id="records-loading" class="muted" style="display:none">加载中…</span>
+            </div>
+        </div>
+    </div>
+
+    <!-- 导入 -->
+    <div class="section" data-reveal style="--d:.18s">
+        <div class="section-head">
+            <h2><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><use href="#i-upload"/></svg>导入钱包记录</h2>
+            <span class="hint">支持 EVE Online 钱包导出格式</span>
+        </div>
+        <div class="panel pad stack">
+            <textarea id="wallet-records" rows="8" placeholder="粘贴钱包记录，例如：
+2025.12.19 00:41 	 合同销售税 	 -900,000 星币 	 582,514,079 星币 	 合同销售税
+2025.12.19 00:41 	 市场交易 	 607,200 星币 	 583,414,079 星币 	 市场：某人购买了物品"></textarea>
+            <div class="row-actions">
+                <button class="btn primary" id="import-btn">
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><use href="#i-upload"/></svg>
+                    导入记录
+                </button>
+                <button class="btn danger" id="clear-btn">
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><use href="#i-trash"/></svg>
+                    清空所有记录
+                </button>
+            </div>
+        </div>
+    </div>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script src="{{ url_for('static', filename='js/chart.umd.min.js') }}"></script>
+<script>
+(function () {
+    'use strict';
+    const $ = (id) => document.getElementById(id);
+    let range = 30, loaded = 0, pageSize = 20;
+    let dailyChart = null, categoryChart = null;
+
+    const C = { income: '#0f9d63', expense: '#e02742', grid: 'rgba(15,23,42,.07)', tick: '#8a93a6',
+        series: ['#3452ff', '#0f9d63', '#e02742', '#c2760a', '#5b74ff', '#7c5cff', '#0aa2c0', '#e8792b'] };
+
+    document.addEventListener('DOMContentLoaded', function () {
+        EH.segment($('time-range'), function (v) { range = Number(v); loaded = 0; load(); });
+        $('exclude-contracts').addEventListener('change', function () { loaded = 0; load(); });
+        $('import-btn').addEventListener('click', importRecords);
+        $('clear-btn').addEventListener('click', clearRecords);
+        $('load-more').addEventListener('click', loadMore);
+        load();
+    });
+
+    function ex() { return $('exclude-contracts').checked; }
+
+    function load() {
+        $('chart-range').textContent = '近 ' + range + ' 天';
+        EH.api('/api/wallet/stats?time_range=' + range + '&exclude_contracts=' + ex())
+            .then(updateStats).catch(e => console.error('统计加载失败', e));
+        EH.api('/api/wallet/chart-data?time_range=' + range + '&exclude_contracts=' + ex())
+            .then(renderCharts).catch(e => console.error('图表加载失败', e));
+        EH.api('/api/wallet/records?limit=' + pageSize + '&time_range=' + range + '&exclude_contracts=' + ex())
+            .then(function (recs) {
+                loaded = recs.length;
+                renderRecords(recs, false);
+                $('load-more').style.display = recs.length < pageSize ? 'none' : 'inline-flex';
+            })
+            .catch(e => console.error('记录加载失败', e));
+    }
+
+    function loadMore() {
+        const btn = $('load-more');
+        btn.disabled = true; $('records-loading').style.display = 'inline';
+        EH.api('/api/wallet/records?limit=' + pageSize + '&skip=' + loaded + '&time_range=' + range + '&exclude_contracts=' + ex())
+            .then(function (recs) {
+                renderRecords(recs, true);
+                loaded += recs.length;
+                btn.style.display = recs.length < pageSize ? 'none' : 'inline-flex';
+            })
+            .catch(function (e) { console.error(e); EH.toast('加载更多失败', 'err'); })
+            .finally(function () { btn.disabled = false; $('records-loading').style.display = 'none'; });
+    }
+
+    function renderRecords(recs, append) {
+        const body = $('records-body');
+        if (!append) body.innerHTML = '';
+        if (!recs.length && !append) { body.innerHTML = '<tr class="empty"><td colspan="5">该时间范围内暂无记录</td></tr>'; return; }
+        const frag = recs.map(function (r) {
+            const pos = r.amount > 0;
+            return '<tr>' +
+                '<td class="mono dim">' + EH.esc(r.datetime) + '</td>' +
+                '<td>' + EH.esc(r.type) + '</td>' +
+                '<td class="r" style="color:' + (pos ? 'var(--pos)' : 'var(--neg)') + ';font-weight:560">' + (pos ? '+' : '') + EH.int(r.amount) + '</td>' +
+                '<td class="r">' + EH.int(r.balance) + '</td>' +
+                '<td class="dim">' + EH.esc(r.description || '') + '</td>' +
+                '</tr>';
+        }).join('');
+        if (append) body.insertAdjacentHTML('beforeend', frag);
+        else body.innerHTML = frag;
+    }
+
+    function updateStats(s) {
+        document.querySelectorAll('.range-tag').forEach(el => el.textContent = range + ' 天');
+        EH.countUp($('total-income'), s.total_income);
+        EH.countUp($('total-expense'), s.total_expense);
+        const p = $('total-profit');
+        EH.countUp(p, s.total_profit);
+        p.className = 'value ' + (s.total_profit >= 0 ? 'pos' : 'neg');
+    }
+
+    function importRecords() {
+        const text = $('wallet-records').value;
+        if (!text.trim()) { EH.toast('请先粘贴钱包记录'); return; }
+        const btn = $('import-btn'); btn.disabled = true;
+        EH.api('/api/wallet/import', {
+            method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ records: text })
+        })
+            .then(function (d) {
+                if (d.success) {
+                    EH.toast('已导入 ' + d.imported_count + ' 条，跳过 ' + d.skipped_count + ' 条重复', 'ok');
+                    $('wallet-records').value = '';
+                    loaded = 0; load();
+                } else EH.toast('导入失败：' + d.error, 'err');
+            })
+            .catch(function (e) { console.error(e); EH.toast('导入出错', 'err'); })
+            .finally(function () { btn.disabled = false; });
+    }
+
+    function clearRecords() {
+        if (!confirm('确定要清空所有钱包记录吗？此操作不可恢复！')) return;
+        EH.api('/api/wallet/clear', { method: 'DELETE' })
+            .then(function (d) {
+                if (d.success) { EH.toast('记录已清空', 'ok'); loaded = 0; load(); }
+                else EH.toast('清空失败：' + d.error, 'err');
+            })
+            .catch(function (e) { console.error(e); EH.toast('清空出错', 'err'); });
+    }
+
+    function baseOpts(extra) {
+        return Object.assign({
+            responsive: true, maintainAspectRatio: false,
+            plugins: {
+                legend: { labels: { color: '#47536b', boxWidth: 10, boxHeight: 10, usePointStyle: true } },
+                tooltip: { backgroundColor: '#fff', borderColor: 'rgba(15,23,42,.14)', borderWidth: 1, titleColor: '#0f172a', bodyColor: '#47536b', padding: 10 }
+            }
+        }, extra || {});
+    }
+
+    function renderCharts(d) {
+        if (dailyChart) dailyChart.destroy();
+        dailyChart = new Chart($('daily-chart'), {
+            type: 'line',
+            data: {
+                labels: d.daily_dates,
+                datasets: [
+                    { label: '收入', data: d.daily_income, borderColor: C.income, backgroundColor: 'rgba(15,157,99,.10)', fill: true, tension: .25, pointRadius: 0, pointHoverRadius: 4, borderWidth: 2 },
+                    { label: '支出', data: d.daily_expense, borderColor: C.expense, backgroundColor: 'rgba(224,39,66,.10)', fill: true, tension: .25, pointRadius: 0, pointHoverRadius: 4, borderWidth: 2 }
+                ]
+            },
+            options: baseOpts({
+                interaction: { mode: 'index', intersect: false },
+                scales: {
+                    y: { grid: { color: C.grid }, ticks: { color: C.tick, callback: v => EH.compact(v) }, border: { color: 'rgba(15,23,42,.1)' } },
+                    x: { grid: { display: false }, ticks: { color: C.tick, maxTicksLimit: 10 }, border: { color: 'rgba(15,23,42,.1)' } }
+                },
+                plugins: {
+                    legend: { labels: { color: '#47536b', boxWidth: 10, boxHeight: 10, usePointStyle: true } },
+                    tooltip: { backgroundColor: '#fff', borderColor: 'rgba(15,23,42,.14)', borderWidth: 1, padding: 10, callbacks: { label: c => c.dataset.label + '：' + EH.int(c.parsed.y) } }
+                }
+            })
+        });
+
+        if (categoryChart) categoryChart.destroy();
+        categoryChart = new Chart($('category-chart'), {
+            type: 'doughnut',
+            data: { labels: d.category_names, datasets: [{ data: d.category_amounts, backgroundColor: C.series, borderColor: '#fff', borderWidth: 2 }] },
+            options: baseOpts({
+                cutout: '62%',
+                plugins: {
+                    legend: { position: 'right', labels: { color: '#47536b', boxWidth: 10, boxHeight: 10, usePointStyle: true, padding: 12 } },
+                    tooltip: { backgroundColor: '#fff', borderColor: 'rgba(15,23,42,.14)', borderWidth: 1, padding: 10, callbacks: { label: c => c.label + '：' + EH.int(c.parsed) } }
+                }
+            })
+        });
+    }
+})();
+</script>
+{% endblock %}

@@ -1,0 +1,292 @@
+{% extends "base.html" %}
+{% set active_page = '/' %}
+{% block title %}市场订单 · EVE Helper{% endblock %}
+
+{% block body %}
+<div class="wrap">
+    <div class="page-head" data-reveal style="--d:.02s">
+        <div>
+            <div class="eyebrow">Workspace</div>
+            <h1>市场订单查询</h1>
+            <div class="sub">按分类浏览吉他星域的买卖单挂单与近月历史成交</div>
+        </div>
+    </div>
+
+    <div class="split">
+        <!-- 市场分类树 -->
+        <aside class="panel tree-panel" data-reveal style="--d:.08s">
+            <div class="panel-head">
+                <b>市场分类</b>
+                <span class="hint" id="tree-count"></span>
+            </div>
+            <div class="tree-search">
+                <div class="field">
+                    <input type="search" id="tree-filter" data-shortcut-search placeholder="筛选分类…（按 / 聚焦）" autocomplete="off" aria-label="筛选市场分类">
+                </div>
+            </div>
+            <div class="tree" id="market-tree" aria-label="市场分类树">
+                <div id="tree-skeleton"></div>
+            </div>
+        </aside>
+
+        <!-- 订单区 -->
+        <section class="panel" data-reveal style="--d:.14s">
+            <div class="panel-head">
+                <b id="selected-item">未选择物品</b>
+                <span class="hint" id="selected-meta">从左侧选择分类与物品</span>
+            </div>
+
+            <div class="tabs" id="order-tabs">
+                <button class="active" data-tab="pane-sell">
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><use href="#i-up"/></svg>
+                    卖单 <span class="cnt" id="sell-count">0</span>
+                </button>
+                <button data-tab="pane-buy">
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><use href="#i-down"/></svg>
+                    买单 <span class="cnt" id="buy-count">0</span>
+                </button>
+                <button data-tab="pane-history">
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><use href="#i-history"/></svg>
+                    历史成交
+                </button>
+            </div>
+
+            <div class="tabpane active" id="pane-sell">
+                <div class="table-scroll">
+                    <table class="data compact">
+                        <thead><tr>
+                            <th class="r">价格</th><th class="r">剩余</th><th class="r">总量</th>
+                            <th>持续时间</th><th>发布时间</th><th class="r">系统</th><th class="r">位置</th>
+                        </tr></thead>
+                        <tbody id="sell-orders-body"><tr class="empty"><td colspan="7">选择物品后显示卖单</td></tr></tbody>
+                    </table>
+                </div>
+            </div>
+
+            <div class="tabpane" id="pane-buy">
+                <div class="table-scroll">
+                    <table class="data compact">
+                        <thead><tr>
+                            <th class="r">价格</th><th class="r">剩余</th><th class="r">总量</th>
+                            <th>持续时间</th><th>发布时间</th><th class="r">系统</th><th class="r">位置</th>
+                        </tr></thead>
+                        <tbody id="buy-orders-body"><tr class="empty"><td colspan="7">选择物品后显示买单</td></tr></tbody>
+                    </table>
+                </div>
+            </div>
+
+            <div class="tabpane" id="pane-history">
+                <div class="chart-box">
+                    <canvas id="history-chart"></canvas>
+                </div>
+                <div id="history-empty" class="empty" style="display:none">暂无历史数据</div>
+                <div class="table-scroll" style="max-height:360px;border-top:1px solid var(--line)">
+                    <table class="data compact">
+                        <thead><tr>
+                            <th>日期</th><th class="r">均价</th><th class="r">最高</th>
+                            <th class="r">最低</th><th class="r">订单数</th><th class="r">成交量</th>
+                        </tr></thead>
+                        <tbody id="history-table-body"><tr class="empty"><td colspan="6">选择物品后显示历史成交</td></tr></tbody>
+                    </table>
+                </div>
+            </div>
+        </section>
+    </div>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script src="{{ url_for('static', filename='js/chart.umd.min.js') }}"></script>
+<script>
+(function () {
+    'use strict';
+    const $ = (id) => document.getElementById(id);
+    let currentItem = null;
+    let tabCtl = null;
+    let chart = null;
+
+    document.addEventListener('DOMContentLoaded', function () {
+        tabCtl = EH.tabs($('order-tabs'), function (tab) {
+            if (tab === 'pane-history' && currentItem) loadHistory(currentItem.id);
+        });
+        $('tree-skeleton').innerHTML = EH.skeletonRows(9, 1);
+        $('tree-filter').addEventListener('input', EH.debounce(function (e) {
+            filterTree(e.target.value.trim().toLowerCase());
+        }, 160));
+        loadTree();
+    });
+
+    /* ---------- 分类树 ---------- */
+    function loadTree() {
+        EH.api('/api/market_groups')
+            .then(function (groups) {
+                $('market-tree').innerHTML = buildTree(groups);
+                $('tree-count').textContent = countNodes(groups) + ' 个分类';
+            })
+            .catch(function (err) { console.error(err); $('market-tree').innerHTML = '<div class="empty">加载分类失败</div>'; });
+    }
+
+    function countNodes(groups) {
+        return groups.reduce(function (n, g) { return n + 1 + (g.children && g.children.length ? countNodes(g.children) : 0); }, 0);
+    }
+
+    function buildTree(groups) {
+        let html = '<ul>';
+        groups.forEach(function (g) {
+            const hasKids = g.children && g.children.length > 0;
+            html += '<li class="node collapsed" data-group="' + g.id + '" data-name="' + EH.esc(g.name) + '" data-kids="' + hasKids + '">' +
+                '<svg class="chev' + (hasKids ? '' : ' hidden') + '" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><use href="#i-chev"/></svg>' +
+                '<svg class="ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><use href="#i-folder"/></svg>' +
+                '<span>' + EH.esc(g.name || '(未命名)') + '</span>' +
+                (hasKids ? buildTree(g.children) : '') +
+                '</li>';
+        });
+        return html + '</ul>';
+    }
+
+    // 事件委托：分类节点
+    EH.delegate($('market-tree'), '.node', 'click', function (e, node) {
+        e.stopPropagation();
+        const wasCollapsed = node.classList.contains('collapsed');
+        node.classList.toggle('collapsed');
+        const hasKids = node.dataset.kids === 'true';
+        if (wasCollapsed && !hasKids && !node.querySelector('.items')) loadItems(node.dataset.group, node);
+    });
+
+    // 事件委托：物品项
+    EH.delegate($('market-tree'), '.item', 'click', function (e, item) {
+        e.stopPropagation();
+        EH.qsa('.item.active', $('market-tree')).forEach(i => i.classList.remove('active'));
+        EH.qsa('.node.selected', $('market-tree')).forEach(n => n.classList.remove('selected'));
+        item.classList.add('active');
+        item.closest('.node').classList.add('selected');
+        currentItem = { id: item.dataset.typeId, name: item.dataset.name };
+        $('selected-item').textContent = item.dataset.name;
+        $('selected-meta').textContent = 'TYPE ID ' + item.dataset.typeId;
+        loadOrders(item.dataset.typeId);
+    });
+
+    function loadItems(groupId, node) {
+        const box = document.createElement('div');
+        box.className = 'items';
+        box.innerHTML = EH.skeletonRows(3, 1);
+        node.appendChild(box);
+        EH.api('/api/market_items/' + groupId)
+            .then(function (items) {
+                box.innerHTML = items.length
+                    ? items.map(it => '<span class="item" data-type-id="' + it.id + '" data-name="' + EH.esc(it.name) + '">' + EH.esc(it.name) + '</span>').join('')
+                    : '<div class="empty" style="padding:8px 10px">无物品</div>';
+            })
+            .catch(function (err) { console.error(err); box.innerHTML = '<div class="empty" style="padding:8px 10px">加载失败</div>'; });
+    }
+
+    function filterTree(q) {
+        EH.qsa('.node', $('market-tree')).forEach(function (node) {
+            const self = (node.dataset.name || '').toLowerCase().indexOf(q) !== -1;
+            const child = EH.qsa('.node', node).some(c => (c.dataset.name || '').toLowerCase().indexOf(q) !== -1);
+            node.style.display = (!q || self || child) ? '' : 'none';
+        });
+    }
+
+    /* ---------- 订单 ---------- */
+    function loadOrders(typeId) {
+        const loading = '<tr class="empty"><td colspan="7">加载订单数据…</td></tr>';
+        $('sell-orders-body').innerHTML = loading;
+        $('buy-orders-body').innerHTML = loading;
+        EH.api('/api/market_orders/' + typeId)
+            .then(function (data) {
+                renderOrders('sell-orders-body', data.sell_orders);
+                renderOrders('buy-orders-body', data.buy_orders);
+                $('sell-count').textContent = data.sell_orders.length;
+                $('buy-count').textContent = data.buy_orders.length;
+            })
+            .catch(function (err) { console.error(err); EH.toast('订单加载失败', 'err'); });
+    }
+
+    function renderOrders(bodyId, orders) {
+        const body = $(bodyId);
+        if (!orders.length) { body.innerHTML = '<tr class="empty"><td colspan="7">暂无数据</td></tr>'; return; }
+        body.innerHTML = orders.map(function (o) {
+            return '<tr>' +
+                '<td class="r strong">' + EH.fmt(o.price, 2) + '</td>' +
+                '<td class="r">' + EH.int(o.volume_remain) + '</td>' +
+                '<td class="r">' + EH.int(o.volume_total) + '</td>' +
+                '<td>' + o.duration + ' 天</td>' +
+                '<td class="dim">' + formatDate(o.issued) + '</td>' +
+                '<td class="r">' + o.system_id + '</td>' +
+                '<td class="r">' + o.location_id + '</td>' +
+                '</tr>';
+        }).join('');
+    }
+
+    /* ---------- 历史 ---------- */
+    function loadHistory(typeId) {
+        $('history-empty').style.display = 'none';
+        $('history-table-body').innerHTML = '<tr class="empty"><td colspan="6">加载历史数据…</td></tr>';
+        EH.api('/api/market_history/' + typeId)
+            .then(function (data) {
+                if (!data.length) {
+                    $('history-empty').style.display = 'block';
+                    $('history-table-body').innerHTML = '<tr class="empty"><td colspan="6">暂无历史数据</td></tr>';
+                    if (chart) { chart.destroy(); chart = null; }
+                    return;
+                }
+                drawChart(data);
+                renderHistoryTable(data);
+            })
+            .catch(function (err) { console.error(err); EH.toast('历史数据加载失败', 'err'); });
+    }
+
+    function renderHistoryTable(rows) {
+        const sorted = rows.slice().sort((a, b) => b.period.localeCompare(a.period));
+        $('history-table-body').innerHTML = sorted.map(function (it) {
+            return '<tr>' +
+                '<td class="mono dim">' + it.period + '</td>' +
+                '<td class="r strong">' + EH.fmt(it.avg_price, 2) + '</td>' +
+                '<td class="r">' + EH.fmt(it.max_price, 2) + '</td>' +
+                '<td class="r">' + EH.fmt(it.min_price, 2) + '</td>' +
+                '<td class="r">' + EH.int(it.total_orders) + '</td>' +
+                '<td class="r">' + EH.int(it.total_volume) + '</td>' +
+                '</tr>';
+        }).join('');
+    }
+
+    function drawChart(rows) {
+        const sorted = rows.slice().sort((a, b) => a.period.localeCompare(b.period));
+        if (chart) chart.destroy();
+        chart = new Chart($('history-chart'), {
+            type: 'line',
+            data: {
+                labels: sorted.map(d => d.period),
+                datasets: [
+                    { label: '均价', data: sorted.map(d => d.avg_price), borderColor: '#3452ff', backgroundColor: 'rgba(52,82,255,.10)', tension: .35, fill: true, pointRadius: 0, pointHoverRadius: 4, borderWidth: 2 },
+                    { label: '最高', data: sorted.map(d => d.max_price), borderColor: 'rgba(224,39,66,.85)', tension: .35, fill: false, pointRadius: 0, pointHoverRadius: 4, borderWidth: 1.4, borderDash: [4, 3] },
+                    { label: '最低', data: sorted.map(d => d.min_price), borderColor: 'rgba(15,157,99,.9)', tension: .35, fill: false, pointRadius: 0, pointHoverRadius: 4, borderWidth: 1.4, borderDash: [4, 3] }
+                ]
+            },
+            options: chartOptions()
+        });
+    }
+
+    function chartOptions() {
+        return {
+            responsive: true, maintainAspectRatio: false,
+            interaction: { mode: 'index', intersect: false },
+            plugins: {
+                legend: { labels: { color: '#47536b', boxWidth: 10, boxHeight: 10, usePointStyle: true } },
+                tooltip: { backgroundColor: '#fff', borderColor: 'rgba(15,23,42,.14)', borderWidth: 1, titleColor: '#0f172a', bodyColor: '#47536b', padding: 10, displayColors: true }
+            },
+            scales: {
+                y: { grid: { color: 'rgba(15,23,42,.07)' }, ticks: { color: '#8a93a6', callback: v => EH.compact(v) }, border: { color: 'rgba(15,23,42,.1)' } },
+                x: { grid: { display: false }, ticks: { color: '#8a93a6', maxTicksLimit: 8 }, border: { color: 'rgba(15,23,42,.1)' } }
+            }
+        };
+    }
+
+    function formatDate(s) {
+        const d = new Date(s);
+        return isNaN(d) ? s : d.toLocaleString('zh-CN', { month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit' });
+    }
+})();
+</script>
+{% endblock %}

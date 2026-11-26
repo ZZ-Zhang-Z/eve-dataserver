@@ -1,0 +1,243 @@
+{% extends "base.html" %}
+{% set active_page = '/analysis' %}
+{% block title %}交易分析 · EVE Helper{% endblock %}
+
+{% block body %}
+<div class="wrap">
+    <div class="page-head" data-reveal style="--d:.02s">
+        <div>
+            <div class="eyebrow">Arbitrage Scanner</div>
+            <h1>市场套利机会</h1>
+            <div class="sub">按利润率、期望利润与资本效率评分筛选可交易物品</div>
+        </div>
+        <div class="inline muted mono" id="updated-at" style="font-size:12px"></div>
+    </div>
+
+    <!-- KPI -->
+    <div class="kpi" data-reveal style="--d:.06s">
+        <div class="cell">
+            <div class="label">分析物品数</div>
+            <div class="value" id="total-items">0</div>
+            <div class="foot">全部已分析物品</div>
+        </div>
+        <div class="cell">
+            <div class="label">套利机会数</div>
+            <div class="value" id="opportunities">0</div>
+            <div class="foot">符合当前筛选</div>
+        </div>
+        <div class="cell">
+            <div class="label">平均利润率</div>
+            <div class="value" id="avg-profit">0.00%</div>
+            <div class="foot">筛选结果均值</div>
+        </div>
+        <div class="cell">
+            <div class="label">市场总期望利润</div>
+            <div class="value sm" id="total-ideal-profit">0</div>
+            <div class="foot">全部物品合计 · ISK</div>
+        </div>
+    </div>
+
+    <!-- 筛选 -->
+    <div class="section" data-reveal style="--d:.1s">
+        <div class="filters">
+            <div class="field">
+                <label for="min-profit">最低利润率</label>
+                <select id="min-profit">
+                    <option value="0">0%</option>
+                    <option value="0.05">5%</option>
+                    <option value="0.1" selected>10%</option>
+                    <option value="0.15">15%</option>
+                    <option value="0.2">20%</option>
+                    <option value="0.3">30%</option>
+                    <option value="0.5">50%</option>
+                </select>
+            </div>
+            <div class="field">
+                <label for="min-ideal-profit">最低市场总期望利润</label>
+                <select id="min-ideal-profit">
+                    <option value="">不筛选</option>
+                    <option value="5000000_less">≤ 5,000,000</option>
+                    <option value="5000000">≥ 5,000,000</option>
+                    <option value="10000000">≥ 10,000,000</option>
+                    <option value="50000000">≥ 50,000,000</option>
+                    <option value="100000000">≥ 100,000,000</option>
+                    <option value="500000000">≥ 500,000,000</option>
+                </select>
+            </div>
+            <div class="field">
+                <label for="item-group">物品组</label>
+                <select id="item-group"><option value="">全部分组</option></select>
+            </div>
+            <div class="field">
+                <label for="sort-by">排序方式</label>
+                <select id="sort-by">
+                    <option value="mvp_score" selected>MVP 资本效率评分</option>
+                    <option value="score">综合评分</option>
+                    <option value="profit_margin">利润率</option>
+                    <option value="profit_per_unit">每单位利润</option>
+                    <option value="ideal_profit">市场总期望利润</option>
+                    <option value="lowest_sell_price">最低卖价</option>
+                </select>
+            </div>
+            <div class="field">
+                <label for="sort-order">排序方向</label>
+                <select id="sort-order">
+                    <option value="desc" selected>降序</option>
+                    <option value="asc">升序</option>
+                </select>
+            </div>
+        </div>
+    </div>
+
+    <div class="section" data-reveal style="--d:.14s">
+        <div class="panel">
+            <div class="panel-head">
+                <b>筛选结果</b>
+                <span class="hint" id="result-count">—</span>
+            </div>
+            <div class="table-scroll" id="results-table" style="max-height:calc(100vh - 260px)">
+                <table class="data">
+                    <thead><tr>
+                        <th style="width:46px">#</th>
+                        <th>物品名称</th>
+                        <th class="r sortable" data-sort="lowest_sell_price">最低卖价<span class="caret"></span></th>
+                        <th class="r">最高买价</th>
+                        <th class="sortable" data-sort="profit_margin" style="width:170px">利润率<span class="caret"></span></th>
+                        <th class="r sortable" data-sort="profit_per_unit">每单位利润<span class="caret"></span></th>
+                        <th class="r sortable" data-sort="ideal_profit">总期望利润<span class="caret"></span></th>
+                        <th class="r sortable" data-sort="score">综合评分<span class="caret"></span></th>
+                        <th class="r sortable" data-sort="mvp_score">MVP 评分<span class="caret"></span></th>
+                        <th style="width:88px"></th>
+                    </tr></thead>
+                    <tbody id="results-body"></tbody>
+                </table>
+            </div>
+            <div id="no-results" class="empty" style="display:none">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><use href="#i-filter"/></svg>
+                没有找到符合条件的套利机会
+            </div>
+        </div>
+    </div>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+(function () {
+    'use strict';
+    const $ = (id) => document.getElementById(id);
+
+    document.addEventListener('DOMContentLoaded', function () {
+        loadGroups();
+        loadAnalysis();
+        ['min-profit', 'min-ideal-profit', 'item-group'].forEach(function (id) {
+            $(id).addEventListener('change', loadAnalysis);
+        });
+        $('sort-by').addEventListener('change', function () { loadAnalysis(); });
+        $('sort-order').addEventListener('change', function () { loadAnalysis(); });
+
+        // 表头点击排序
+        EH.delegate($('results-table'), 'th.sortable', 'click', function (e, th) {
+            const field = th.dataset.sort;
+            const by = $('sort-by');
+            if (by.value === field) {
+                $('sort-order').value = $('sort-order').value === 'desc' ? 'asc' : 'desc';
+            } else {
+                by.value = field;
+                $('sort-order').value = 'desc';
+            }
+            loadAnalysis();
+        });
+    });
+
+    function loadGroups() {
+        EH.api('/api/market_groups').then(function (groups) {
+            const select = $('item-group');
+            groups.forEach(function (g) {
+                const opt = document.createElement('option');
+                opt.value = g.id;
+                opt.textContent = g.name || '(未命名)';
+                select.appendChild(opt);
+            });
+        }).catch(function (e) { console.error('加载物品组失败:', e); });
+    }
+
+    function loadAnalysis() {
+        $('no-results').style.display = 'none';
+        $('results-body').innerHTML = new Array(8).fill(0).map(function () {
+            return '<tr><td colspan="10" style="padding:7px 14px"><span class="sk" style="display:block;height:14px"></span></td></tr>';
+        }).join('');
+        updateCarets();
+
+        const params = new URLSearchParams({
+            min_profit: $('min-profit').value,
+            min_ideal_profit: $('min-ideal-profit').value,
+            sort_by: $('sort-by').value,
+            sort_order: $('sort-order').value
+        });
+        if ($('item-group').value) params.append('item_group', $('item-group').value);
+
+        EH.api('/api/analysis?' + params)
+            .then(function (data) {
+                updateKpi(data);
+                renderTable(data.results);
+                $('updated-at').textContent = '更新于 ' + new Date().toLocaleTimeString('zh-CN');
+            })
+            .catch(function (e) { console.error(e); EH.toast('加载分析数据失败', 'err'); });
+    }
+
+    function updateKpi(data) {
+        EH.countUp($('total-items'), data.total_items);
+        EH.countUp($('opportunities'), data.results.length);
+        EH.countUp($('total-ideal-profit'), data.total_ideal_profit_all || 0);
+        const avg = data.results.length
+            ? data.results.reduce((s, i) => s + i.profit_margin, 0) / data.results.length : 0;
+        const el = $('avg-profit');
+        el.textContent = (avg * 100).toFixed(2) + '%';
+        el.className = 'value ' + (avg >= 0.15 ? 'pos' : (avg < 0.08 ? 'neg' : ''));
+        $('result-count').textContent = data.results.length + ' / ' + data.total_items + ' 项';
+    }
+
+    function renderTable(results) {
+        const tbody = $('results-body');
+        if (!results.length) {
+            tbody.innerHTML = '';
+            $('no-results').style.display = 'block';
+            return;
+        }
+        tbody.innerHTML = results.map(function (item, index) {
+            const pct = item.profit_margin * 100;
+            const barW = Math.max(3, Math.min(100, pct));
+            const tone = pct >= 30 ? 'pos' : (pct >= 10 ? '' : 'warn');
+            const scoreTone = item.score >= 80 ? 'acc' : (item.score >= 50 ? 'mute' : 'warn');
+            const mvp = item.mvp_score !== undefined ? Number(item.mvp_score).toLocaleString(undefined, { maximumSignificantDigits: 3 }) : '—';
+            return '<tr>' +
+                '<td class="mono muted">' + (index + 1) + '</td>' +
+                '<td class="strong">' + EH.esc(item.name) + '</td>' +
+                '<td class="r">' + EH.fmt(item.lowest_sell_price, 2) + '</td>' +
+                '<td class="r">' + EH.fmt(item.highest_buy_price, 2) + '</td>' +
+                '<td><div class="ratio"><span class="bar"><i class="' + tone + '" style="width:' + barW + '%"></i></span><span class="val">' + pct.toFixed(1) + '%</span></div></td>' +
+                '<td class="r">' + EH.fmt(item.profit_per_unit, 2) + '</td>' +
+                '<td class="r strong">' + EH.compact(item.ideal_profit) + '</td>' +
+                '<td class="r"><span class="badge ' + scoreTone + '">' + item.score + '</span></td>' +
+                '<td class="r mono">' + mvp + '</td>' +
+                '<td><button class="btn ghost sm" data-id="' + item.type_id + '">查看</button></td>' +
+                '</tr>';
+        }).join('');
+        updateCarets();
+    }
+
+    EH.delegate(document, '#results-body button[data-id]', 'click', function (e, btn) {
+        EH.toast('物品 ID：' + btn.dataset.id + '（可在首页分类中查看订单）');
+    });
+
+    function updateCarets() {
+        const by = $('sort-by').value, order = $('sort-order').value;
+        EH.qsa('th.sortable').forEach(function (th) {
+            const caret = th.querySelector('.caret');
+            caret.className = 'caret' + (th.dataset.sort === by ? ' ' + order : '');
+        });
+    }
+})();
+</script>
+{% endblock %}

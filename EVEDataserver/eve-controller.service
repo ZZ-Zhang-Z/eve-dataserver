@@ -1,0 +1,32 @@
+[Unit]
+Description=EVE Data Collection Controller
+Documentation=file:///home/admin/eve_helper/EVEDataserver/README.md
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=admin
+Group=admin
+WorkingDirectory=/home/admin/eve_helper
+Environment=PYTHONUNBUFFERED=1
+Environment=PYTHONUTF8=1
+Environment=TZ=Asia/Shanghai
+ExecStart=/home/admin/eve_helper/.venv/bin/python -u EVEDataserver/controller.py
+
+Restart=always
+RestartSec=30
+# 控制器收到 SIGTERM 后会等待当前子进程（最多 10 秒），60 秒足够走完
+TimeoutStopSec=60
+# SIGTERM 只发给主进程，让它有机会优雅处理；SIGKILL 才清整组
+KillMode=mixed
+
+# 该 cgroup 覆盖控制器与全部采集子进程。
+# 全量聚合版订单采集峰值约 284MB，留 500MB 上限；完成逐页落盘改造后可降到 300MB。
+MemoryHigh=350M
+MemoryMax=500M
+# 子进程被 cgroup OOM killer 杀掉时，控制器继续运行并记录退出码
+OOMPolicy=continue
+
+[Install]
+WantedBy=multi-user.target

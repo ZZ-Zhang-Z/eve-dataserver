@@ -1,0 +1,32 @@
+# 虚拟环境
+.venv/
+venv/
+
+# Python 缓存
+__pycache__/
+*.py[cod]
+*.egg-info/
+
+# 日志
+logs/
+*.log
+
+# 敏感凭证（切勿提交）
+esi_credentials.json
+.env
+.keys/
+
+# 数据与产物
+data/
+*.db
+*.db-wal
+*.db-shm
+*.bak
+
+# 临时备份
+_backup_pre_refactor/state.json
+*.pem
+*.key
+.DS_Store
+*.log.*
+deploy/
