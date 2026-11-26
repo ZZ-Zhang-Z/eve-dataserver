@@ -1,0 +1,6 @@
+# 服务器端运行依赖
+# 控制器（controller/core/plugins）只用 Python 标准库；
+# 采集器需要 aiohttp（HTTP）与 tqdm（进度条）。
+# 版本与开发环境保持一致，升级时两边同步。
+aiohttp==3.13.2
+tqdm==4.67.1

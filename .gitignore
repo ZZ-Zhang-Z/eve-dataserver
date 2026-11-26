@@ -30,3 +30,19 @@ _backup_pre_refactor/state.json
 .DS_Store
 *.log.*
 deploy/
+
+# 仓库只收录 EVEDataserver/；以下是本地开发/分析侧文件，不纳入版本管理
+/collectors/
+/scripts/
+/docs/
+/templates/
+/tests/
+/webapp/
+/app.py
+/config.json
+/database_manager.py
+/paths.py
+/README.md
+/requirements.txt
+/.env.example
+/deploy/

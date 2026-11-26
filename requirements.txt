@@ -1,7 +1,0 @@
-# EVE Helper 运行依赖（按实际 import 人工精简）
-Flask==3.1.2
-flask-cors==6.0.2
-aiohttp==3.13.2
-tqdm==4.67.1
-numpy==2.4.0
-requests>=2.31.0  # scripts/cache_management/generate_new_cache.py 使用
