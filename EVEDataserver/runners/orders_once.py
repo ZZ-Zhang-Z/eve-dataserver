@@ -3,6 +3,9 @@
 作为独立子进程运行，让控制器能在每轮结束后彻底回收内存 —— 418 页聚合时
 峰值可达 284MB，进程退出是最彻底的回收方式。
 
+依赖全部来自 EVEDataserver 内部（collectors/、paths.py、database_manager.py），
+不再引用项目根目录的代码；但数据与 config.json 仍在项目根，位置不变。
+
 退出码：
   0  成功写入
   2  快照不完整（已保留上一份数据，属预期内的保护性跳过）
@@ -16,9 +19,10 @@ import platform
 import sys
 import time
 
-ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-sys.path.insert(0, os.path.join(ROOT, "collectors"))
-sys.path.insert(0, ROOT)
+# EVEDataserver 根目录（本文件的上一级）
+HERE = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+sys.path.insert(0, os.path.join(HERE, "collectors"))
+sys.path.insert(0, HERE)
 
 import aiohttp  # noqa: E402
 import jita_market_orders_collector_async as collector  # noqa: E402

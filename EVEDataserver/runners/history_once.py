@@ -4,6 +4,9 @@
 控制器无法区分「跑完了」和「全军覆没」。这里组合两个内部函数，并读取模块级
 error_count 做一次粗略的成功判断。
 
+依赖全部来自 EVEDataserver 内部（collectors/、paths.py、database_manager.py），
+不再引用项目根目录的代码；但数据与 config.json 仍在项目根，位置不变。
+
 退出码：
   0  正常
   5  错误计数过高（超过 20% 的 type 失败，通常是网络或限流问题）
@@ -14,9 +17,10 @@ import os
 import platform
 import sys
 
-ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-sys.path.insert(0, os.path.join(ROOT, "collectors"))
-sys.path.insert(0, ROOT)
+# EVEDataserver 根目录（本文件的上一级）
+HERE = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+sys.path.insert(0, os.path.join(HERE, "collectors"))
+sys.path.insert(0, HERE)
 
 import jita_market_history_collector_async as collector  # noqa: E402
 

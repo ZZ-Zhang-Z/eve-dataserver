@@ -37,7 +37,7 @@
     "sde": {
       "enabled": true,
       "desc": "SDE 静态数据导入（约 95MB 下载）",
-      "script": "collectors/item_sde_collector.py",
+      "script": "EVEDataserver/collectors/item_sde_collector.py",
       "schedule": { "type": "weekly", "weekday": 6, "at": "09:30" },
       "timeout_seconds": 1800
     },
@@ -45,7 +45,7 @@
     "monthly": {
       "enabled": true,
       "desc": "月度历史聚合与数据库压缩",
-      "script": "scripts/cache_management/aggregate_monthly_history.py",
+      "script": "EVEDataserver/scripts/aggregate_monthly_history.py",
       "schedule": { "type": "monthly", "day": 1, "at": "04:30" },
       "timeout_seconds": 3600,
       "depends_on": ["history"]

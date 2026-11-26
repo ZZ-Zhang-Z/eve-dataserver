@@ -5,9 +5,22 @@
 
 ## 目录结构
 
+**本目录是自包含的**：任务实际用到的代码（采集器、`esi_client`、`database_manager`、
+`paths`、月度聚合脚本）都有一份副本在内部，不依赖项目根目录的同名文件。数据与
+`config.json` 仍位于项目根，位置不变。
+
 ```
 EVEDataserver/
 ├── controller.py           主循环：算时间、查依赖、过闸门、调执行器
+├── paths.py                路径常量（BASE_DIR 取上一级 → 数据仍在项目根）
+├── database_manager.py     数据库连接管理（副本）
+├── collectors/             采集器副本（runner 与 sde 任务实际引用这里）
+│   ├── esi_client.py
+│   ├── jita_market_orders_collector_async.py
+│   ├── jita_market_history_collector_async.py
+│   └── item_sde_collector.py
+├── scripts/
+│   └── aggregate_monthly_history.py   月度聚合（副本，sys.path 指向本目录）
 ├── core/
 │   ├── registry.py         扩展点注册表（executor/schedule/guard/hook）
 │   ├── context.py          TaskResult / TaskSpec / TaskContext
@@ -31,6 +44,19 @@ EVEDataserver/
     ├── test_units.py       调度/闸门/状态 7 组
     └── test_plugins.py     扩展性 8 组
 ```
+
+### 副本与项目根的关系
+
+`collectors/`、`database_manager.py` 是项目根同名文件的副本，两者行为一致
+（`paths.py` 是唯一例外：它的 `BASE_DIR` 指向 EVEDataserver 的上一级，保证
+`data/`、`logs/`、`config.json` 仍解析到项目根）。
+
+因此：
+
+- **改采集器逻辑时，根目录和 `EVEDataserver/collectors/` 两处都要改**，
+  否则服务器用的还是旧副本；
+- 只想快速同步，可直接 `cp collectors/*.py EVEDataserver/collectors/`，
+  但**不要覆盖 `EVEDataserver/paths.py`**（它的 BASE_DIR 与非副本不同）。
 
 ## 扩展模型
 
