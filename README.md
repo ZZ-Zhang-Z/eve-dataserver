@@ -242,6 +242,14 @@ python3 -m venv .venv && .venv/bin/pip install -r requirements.txt
 .venv/bin/python -V          # 期望 3.11.x
 ```
 
+国内服务器直连 PyPI 常常超时（`Could not find a version that satisfies ... (from versions: none)`），
+先配镜像再装：
+
+```bash
+mkdir -p ~/.config/pip
+printf '[global]\nindex-url = https://mirrors.aliyun.com/pypi/simple/\ntimeout = 30\n' > ~/.config/pip/pip.conf
+```
+
 ### 2. 采集器配置
 
 ```bash
@@ -476,6 +484,13 @@ pgrep -af "controller.py|_once.py" || echo "已全部退出"
 
 ## 已知限制
 
+- **SQL 必须兼容 SQLite 3.26**（服务器自带版本）。不要用 `UPDATE ... FROM`（3.33+）、
+  `RETURNING`（3.35+）、`VACUUM INTO`（3.27+）。需要「按另一张表更新」时用行值 +
+  相关子查询（见 `_sync_orders_from_staging`）；备份用 `sqlite3 db ".backup 目标"`。
+  本地开发环境（Windows Python 3.13）的 SQLite 更新，**不能**靠本地测试发现这类问题，
+  改动 SQL 后要在服务器上跑一遍 `tests/`。
+- `market_order_snapshots.last_modified` 目前恒为 `NULL`（列已建但未接上采集值），
+  排查跨代问题时以日志里的 `Last-Modified` 为准。
 - `cron` 调度只支持 5 字段的常见写法（`*/n`、`a-b`、`a-b/n`、逗号列表），
   不支持 `L`、`W`、`#`。
 - `group` 字段预留但未启用：当前严格串行，若将来需要并行，按 group 做资源互斥即可。
