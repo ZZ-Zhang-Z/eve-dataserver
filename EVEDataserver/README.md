@@ -176,6 +176,26 @@ monthly     每月 1 日 04:30  依赖 history | 内存≥180MB...
 
 ## 部署
 
+仓库只收录本目录，clone 后需补齐项目根的运行时文件（数据、日志、采集器配置）：
+
+```bash
+git clone git@github.com:ZZ-Zhang-Z/eve-dataserver.git ~/eve_helper
+cd ~/eve_helper
+
+# 采集器运行时配置：注意与 EVEDataserver/config.json（调度表）是两个不同的文件
+cp EVEDataserver/config.collector.example.json config.json
+# 按需修改 user_agent 为真实邮箱、决定 market_orders_tracker.enabled
+
+mkdir -p data logs/collectors
+python3.11 -m venv .venv
+.venv/bin/pip install -r EVEDataserver/requirements.txt
+```
+
+`paths.py` 的 `BASE_DIR` 指向 `EVEDataserver` 的上一级，因此 `data/`、`logs/`、
+`config.json` 都在 `~/eve_helper` 下，与上面的准备步骤对应。
+
+### 安装常驻服务
+
 ```bash
 sudo cp ~/eve_helper/EVEDataserver/eve-controller.service /etc/systemd/system/
 sudo cp ~/eve_helper/EVEDataserver/logrotate-eve /etc/logrotate.d/eve-helper
@@ -184,7 +204,14 @@ sudo systemctl enable --now eve-controller
 journalctl -u eve-controller -f
 ```
 
-> 不要与 `deploy/` 下的旧单元同时启用，否则同一份数据会被采集两次。
+> 不要与旧 `deploy/` 目录下的单元同时启用，否则同一份数据会被采集两次。
+
+### 更新代码
+
+```bash
+cd ~/eve_helper && git pull
+sudo systemctl restart eve-controller   # 仅 controller 代码变动时需要
+```
 
 ## 配置：两种写法
 
