@@ -1,48 +1,31 @@
-# 虚拟环境
-.venv/
-venv/
-
-# Python 缓存
+# Python
 __pycache__/
 *.py[cod]
 *.egg-info/
+.venv/
+venv/
 
-# 日志
-logs/
-*.log
-
-# 敏感凭证（切勿提交）
-esi_credentials.json
-.env
-.keys/
-
-# 数据与产物
+# 运行时数据与日志（采集产物，不入库）
 data/
+logs/
+state.json
+.controller.lock
 *.db
 *.db-wal
 *.db-shm
 *.bak
 
-# 临时备份
-_backup_pre_refactor/state.json
+# 采集器运行时配置：由 config.collector.example.json 生成，含真实邮箱
+config.json
+
+# 敏感凭证
+.env
+.keys/
 *.pem
 *.key
-.DS_Store
-*.log.*
-deploy/
+esi_credentials.json
 
-# 仓库只收录 EVEDataserver/；以下是本地开发/分析侧文件，不纳入版本管理
-/collectors/
-/scripts/
-/docs/
-/templates/
-/tests/
-/webapp/
-/app.py
-/config.json
-/database_manager.py
-/paths.py
-/README.md
-/requirements.txt
-/.env.example
-/deploy/
+# 编辑器 / 系统
+.vscode/
+.idea/
+.DS_Store

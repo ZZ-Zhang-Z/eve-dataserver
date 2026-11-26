@@ -42,14 +42,19 @@ from core import registry
 from core.context import TaskContext, TaskResult
 from core.task import load_tasks
 from state import State
+import paths
 
 HERE = os.path.dirname(os.path.abspath(__file__))
-ROOT = os.path.dirname(HERE)
+# 本目录即项目根：config 里的 runner/script/log_dir/state_file 都相对它解析。
+# 独立项目布局（本目录就是项目根）与早期的 EVE_helper/EVEDataserver 子目录布局
+# 用的是同一套相对路径，因此两种布局都能直接运行。
+ROOT = HERE
 
 GUARD_RETRY_SECONDS = 60  # 被闸门/依赖拦下后，多久重试一次
 
 log = logging.getLogger("controller")
-CONFIG_PATH = os.path.join(HERE, "config.json")
+CONFIG_PATH = os.path.join(HERE, "controller.json")
+LEGACY_CONFIG_PATH = os.path.join(HERE, "config.json")  # 旧名，仅用于提示
 
 
 # ---------------------------------------------------------------- 工具
@@ -431,7 +436,15 @@ def main(argv=None):
         cfg = load_config(CONFIG_PATH)
     except (OSError, ValueError) as exc:
         print(f"读取配置失败：{exc}")
+        if os.path.exists(LEGACY_CONFIG_PATH):
+            print("提示：控制器的配置已改名 controller.json，检测到旧名 config.json。"
+                  "\n      两者语义不同：controller.json 是调度表，"
+                  "config.json 是采集器运行时配置。请把旧文件重命名为 controller.json。")
         return 2
+
+    # 独立项目首次运行时没有 data/ 与 logs/，这里一次性补齐
+    base = paths.ensure_dirs()
+    log.debug("数据根目录：%s", base)
 
     setup_logging(resolve(cfg.get("log_dir", "logs/controller")),
                   getattr(logging, args.log_level.upper(), logging.INFO))
@@ -455,7 +468,7 @@ def main(argv=None):
         print(f"任务配置有误：{exc}")
         return 2
 
-    state = State(resolve(cfg.get("state_file", "EVEDataserver/state.json")))
+    state = State(resolve(cfg.get("state_file", "state.json")))
 
     if args.status:
         print_status(tasks, state)
@@ -470,7 +483,7 @@ def main(argv=None):
     reload_event = threading.Event()
     install_signals(stop_event, reload_event)
 
-    lock_path = resolve(cfg.get("lock_file", "EVEDataserver/.controller.lock"))
+    lock_path = resolve(cfg.get("lock_file", ".controller.lock"))
     os.makedirs(os.path.dirname(lock_path), exist_ok=True)
     with SingleInstance(lock_path):
         loop(tasks, cfg, state, stop_event, reload_event)

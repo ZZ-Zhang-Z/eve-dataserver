@@ -1,12 +1,13 @@
 #!/usr/bin/env bash
 # EVE 采集控制器健康检查
-# 用法：bash EVEDataserver/healthcheck.sh
+# 用法：bash healthcheck.sh（脚本位置即项目根，不依赖固定路径）
 # 退出码：0 正常 / 1 存在异常项
 set -uo pipefail
 
-ROOT="/home/admin/eve_helper"
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PY="$ROOT/.venv/bin/python"
-CTL="$ROOT/EVEDataserver/controller.py"
+[ -x "$PY" ] || PY="$(command -v python3)"
+CTL="$ROOT/controller.py"
 fail=0
 
 check() { printf '%-22s %s\n' "$1" "$2"; }

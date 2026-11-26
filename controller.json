@@ -4,8 +4,8 @@
   "python": "",
   "log_dir": "logs/controller",
   "task_log_dir": "logs/collectors",
-  "state_file": "EVEDataserver/state.json",
-  "lock_file": "EVEDataserver/.controller.lock",
+  "state_file": "state.json",
+  "lock_file": ".controller.lock",
   "plugin_modules": [],
 
   "resources": {
@@ -18,7 +18,7 @@
     "orders": {
       "enabled": true,
       "desc": "吉他订单快照与变更事件",
-      "runner": "EVEDataserver/runners/orders_once.py",
+      "runner": "runners/orders_once.py",
       "schedule": { "type": "interval", "minutes": 30, "align": true },
       "skip_windows": [["18:55", "19:45"]],
       "timeout_seconds": 300,
@@ -29,7 +29,7 @@
     "history": {
       "enabled": true,
       "desc": "全量成交历史（15216 个 type，约 40 分钟）",
-      "runner": "EVEDataserver/runners/history_once.py",
+      "runner": "runners/history_once.py",
       "schedule": { "type": "daily", "at": "08:00" },
       "timeout_seconds": 7200
     },
@@ -37,7 +37,7 @@
     "sde": {
       "enabled": true,
       "desc": "SDE 静态数据导入（约 95MB 下载）",
-      "script": "EVEDataserver/collectors/item_sde_collector.py",
+      "script": "collectors/item_sde_collector.py",
       "schedule": { "type": "weekly", "weekday": 6, "at": "09:30" },
       "timeout_seconds": 1800
     },
@@ -45,7 +45,7 @@
     "monthly": {
       "enabled": true,
       "desc": "月度历史聚合与数据库压缩",
-      "script": "EVEDataserver/scripts/aggregate_monthly_history.py",
+      "script": "scripts/aggregate_monthly_history.py",
       "schedule": { "type": "monthly", "day": 1, "at": "04:30" },
       "timeout_seconds": 3600,
       "depends_on": ["history"]

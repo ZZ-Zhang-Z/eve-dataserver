@@ -1,0 +1,16 @@
+{
+  "_说明": [
+    "采集器运行时配置模板。采集器按 paths.BASE_DIR/config.json 读取，即项目根目录。",
+    "部署：cp config.collector.example.json config.json，然后按需修改。",
+    "user_agent 建议填自己的邮箱，便于 CCP 在异常流量时联系；",
+    "market_orders_tracker.enabled 设为 true 才会产生变更事件（churn 数据源）。",
+    "注意：本文件与 controller.json（控制器调度表）是两个不同的配置。"
+  ],
+  "compatibility_date": "2026-08-18",
+  "user_agent": "EveHelperMarketCollector/1.0 (your-email@example.com)",
+  "market_orders_tracker": {
+    "enabled": false,
+    "interval_minutes": 30,
+    "retention_hours": 24
+  }
+}

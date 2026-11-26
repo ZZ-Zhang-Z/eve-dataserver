@@ -1,6 +1,6 @@
 [Unit]
 Description=EVE Data Collection Controller
-Documentation=file:///home/admin/eve_helper/EVEDataserver/README.md
+Documentation=file:///home/admin/eve_helper/README.md
 After=network-online.target
 Wants=network-online.target
 
@@ -12,7 +12,7 @@ WorkingDirectory=/home/admin/eve_helper
 Environment=PYTHONUNBUFFERED=1
 Environment=PYTHONUTF8=1
 Environment=TZ=Asia/Shanghai
-ExecStart=/home/admin/eve_helper/.venv/bin/python -u EVEDataserver/controller.py
+ExecStart=/home/admin/eve_helper/.venv/bin/python -u controller.py
 
 Restart=always
 RestartSec=30

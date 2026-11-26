@@ -39,7 +39,7 @@ class SubprocessExecutor:
 
     spec 支持两种写法：
         {"command": ["{python}", "-u", "runners/x.py"]}
-        {"runner": "EVEDataserver/runners/orders_once.py"}  # 等价于 {python} -u <path>
+        {"runner": "runners/orders_once.py"}  # 等价于 {python} -u <path>
     {python} 会替换为配置里的解释器（缺省用当前解释器，即 venv 里的那个）。
     """
 

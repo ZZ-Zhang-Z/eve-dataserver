@@ -1,0 +1,29 @@
+[project]
+name = "eve-dataserver"
+version = "0.1.0"
+description = "EVE Online 市场数据长期采集服务：插件化调度控制器 + ESI 采集器"
+readme = "README.md"
+requires-python = ">=3.8"
+license = { text = "Proprietary" }
+dependencies = [
+    "aiohttp==3.13.2",
+    "tqdm==4.67.1",
+]
+
+# 说明：本项目是「应用」而非「库」，不发布也不作为包安装。
+# 安装依赖请用 requirements.txt：
+#   python3 -m venv .venv && .venv/bin/pip install -r requirements.txt
+# 运行入口是 controller.py，测试用 tests/ 下的脚本（也可 pytest 直接收集）。
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+python_files = ["test_*.py"]
+addopts = "-q"
+
+[tool.ruff]
+line-length = 100
+target-version = "py38"
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I"]
+ignore = ["E501"]
