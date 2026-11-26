@@ -67,7 +67,8 @@ cp config.collector.example.json config.json
 ├── eve-controller.service  systemd 单元
 ├── logrotate-eve           子进程日志轮转
 ├── healthcheck.sh          健康检查
-└── docs/运维手册.md        面向运维交接的独立文档（启停/巡检/故障处置）
+├── docs/运维手册.md        面向运维交接的独立文档（启停/巡检/故障处置）
+└── ops/                    通过 QQ 私聊控制服务（宿主机代理 + AstrBot 插件）
 ```
 
 ## 调度表（`controller.json`）

@@ -1,0 +1,28 @@
+[Unit]
+Description=EVE 采集服务受限执行代理（供 AstrBot 容器调用）
+Documentation=file:///home/admin/eve_helper/README.md
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=eveops
+Group=eveops
+# 必须用 python3.11：本机 /usr/bin/python3 是 3.6，没有 ThreadingHTTPServer（3.7+）
+Environment="EVE_OPS_BIND=127.0.0.1 172.18.0.1"
+Environment=EVE_OPS_APP_DIR=/home/admin/eve_helper
+Environment=EVE_OPS_TOKEN_FILE=/etc/eve-ops/token
+ExecStart=/usr/bin/python3.11 /opt/eve-ops/eve_ops_agent.py
+Restart=always
+RestartSec=5
+ProtectHome=read-only
+PrivateTmp=yes
+
+# 注意：不要加 ProtectSystem=full/strict，也不要加 ProtectKernelTunables /
+# ProtectControlGroups / RestrictRealtime。本机 systemd 239 下这些选项会让
+# sudo 的 setuid 失效，报 "effective uid is not 0"（实测 2026-11-26）。
+# 同理不要加 NoNewPrivileges=yes。
+# 安全边界靠 sudoers 白名单（3 个 systemctl 动词 + 一条 cat），不靠沙箱。
+
+[Install]
+WantedBy=multi-user.target

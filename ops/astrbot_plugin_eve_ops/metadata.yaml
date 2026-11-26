@@ -1,0 +1,7 @@
+name: astrbot_plugin_eve_ops
+display_name: EVE 采集控制
+desc: 私聊控制 EVE 数据采集服务（status / start / stop / restart），经宿主机受限代理执行
+short_desc: 私聊启停 EVE 采集服务
+version: v1.0.0
+author: ZZ-Zhang-Z
+repo: https://github.com/ZZ-Zhang-Z/eve-dataserver

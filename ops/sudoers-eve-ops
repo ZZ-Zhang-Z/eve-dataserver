@@ -1,0 +1,13 @@
+# eveops 只能做这三件事，且必须免密；不要扩大范围。
+# 安装：sudo install -m 0440 -o root -g root this-file /etc/sudoers.d/eve-ops
+# 校验：sudo visudo -cf /etc/sudoers.d/eve-ops
+
+eveops ALL=(root) NOPASSWD: /usr/bin/systemctl start eve-controller, \
+                            /usr/bin/systemctl stop eve-controller, \
+                            /usr/bin/systemctl restart eve-controller
+
+# 只读状态：state.json 是 admin:admin 0600，且每次落盘都会回到 0600，
+# 所以只能给一条精确到文件的 cat，而不是改权限。
+eveops ALL=(admin) NOPASSWD: /bin/cat /home/admin/eve_helper/state.json
+
+# 只读查询不需要 root，agent 直接调 systemctl is-active，所以不在此列。

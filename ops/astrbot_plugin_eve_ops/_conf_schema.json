@@ -1,0 +1,27 @@
+{
+  "agent_url": {
+    "description": "宿主机受限代理的完整地址（容器内通过 docker 网桥访问）",
+    "type": "string",
+    "default": "http://172.18.0.1:8765/action"
+  },
+  "agent_token": {
+    "description": "与宿主机 /etc/eve-ops/token 一致；留空则拒绝执行任何动作",
+    "type": "string",
+    "default": ""
+  },
+  "allowed_uids": {
+    "description": "允许使用的 QQ 号，逗号分隔；留空表示所有 AstrBot 管理员。建议填上自己的号",
+    "type": "string",
+    "default": ""
+  },
+  "confirm_ttl": {
+    "description": "stop / restart 的二次确认有效期（秒）",
+    "type": "int",
+    "default": 60
+  },
+  "timeout_seconds": {
+    "description": "调用宿主机代理的超时（秒）",
+    "type": "int",
+    "default": 30
+  }
+}
